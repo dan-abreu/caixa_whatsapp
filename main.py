@@ -948,7 +948,7 @@ async def whatsapp_webhook(
 
     try:
         body_data = await request.json()
-        if not body_data:
+        if not isinstance(body_data, dict) or not body_data:
             body_data = {}
     except Exception:
         body_data = {}
@@ -978,7 +978,7 @@ async def whatsapp_webhook(
         or None
     )
 
-    remetente = payload.remetente.strip()
+    remetente = payload.remetente.strip().replace("whatsapp:", "")
     mensagem = payload.mensagem.strip()
     db: Optional[DatabaseClient] = None
 
