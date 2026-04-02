@@ -4,7 +4,7 @@ import re
 import unicodedata
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, cast
 
 from fastapi import FastAPI, Header, HTTPException, Request, Response
 from pydantic import BaseModel, Field, ValidationError, field_validator
@@ -943,13 +943,14 @@ async def whatsapp_webhook(
     x_twilio_message_sid: Optional[str] = Header(default=None, alias="X-Twilio-MessageSid"),
 ) -> Dict[str, Any]:
     provider_message_id = x_provider_message_id or x_twilio_message_sid
+    raw_body: Any = {}
     body_data: Dict[str, Any] = {}
     payload: Optional[WhatsAppWebhookPayload] = None
 
     try:
-        body_data = await request.json()
-        if not isinstance(body_data, dict) or not body_data:
-            body_data = {}
+        raw_body = await request.json()
+        if isinstance(raw_body, dict):
+            body_data = cast(Dict[str, Any], raw_body)
     except Exception:
         body_data = {}
 
