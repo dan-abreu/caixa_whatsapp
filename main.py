@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, Header, HTTPException, Response
+from fastapi import FastAPI, Header, HTTPException, Request, Response
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from ai_service import AIServiceError, extract_message_data
@@ -799,81 +799,6 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
         if cotacao <= 0:
             return {"mensagem": "Preço inválido. Informe o preço por grama em USD (ex: 65.50).", "dados": {"etapa": estado}}
 
-        ativo_id_ctx = int(contexto["ativo_id"])
-        quantidade = Decimal(str(contexto["quantidade"]))
-        tipo_operacao = str(contexto["tipo_operacao"])
-        nome_ativo = str(contexto.get("nome_ativo", ""))
-        source_msg_id = contexto.get("source_message_id")
-        total = money(quantidade * cotacao)
-
-        transacao = db.insert_transacao(
-            tipo_operacao=tipo_operacao,
-            ativo_id=ativo_id_ctx,
-            quantidade=quantidade,
-            cotacao_usada=cotacao,
-            valor_total=total,
-            operador_id=remetente,
-            source_message_id=source_msg_id,
-            status="registrada",
-        )
-
-        review_payload: Optional[Dict[str, Any]] = None
-        review_transaction: Dict[str, Any] = {
-            "tipo_operacao": tipo_operacao,
-            "ativo": nome_ativo,
-            "quantidade": str(quantidade),
-            "peso": str(quantidade),
-            "preco_usd": str(money(cotacao)),
-            "valor_total": str(total),
-            "total_usd": str(total),
-            "total_pago_usd": str(total),
-        }
-        if _should_trigger_multi_agent_review(review_transaction):
-            review_payload = _run_automatic_multi_agent_review(
-                db,
-                objective="avaliacao automatica de operacao via webhook",
-                transaction=review_transaction,
-                operation_id=transacao.get("id"),
-                operation_kind="transacao",
-                source_message_id=source_msg_id,
-            )
-
-        operacao_texto = {
-            "compra": "Compra registrada",
-            "venda": "Venda registrada",
-            "cambio": "Câmbio registrado",
-        }.get(tipo_operacao, "Operação registrada")
-
-        _clear_session(db, remetente)
-
-        response_payload: Dict[str, Any] = {
-            "mensagem": f"✅ {operacao_texto}. {quantidade} x ${money(cotacao)} = ${total}.",
-            "dados": {
-                "intencao": "registrar_operacao",
-                "tipo_operacao": tipo_operacao,
-                "ativo": nome_ativo,
-                "quantidade": str(quantidade),
-                "cotacao_usada": str(money(cotacao)),
-                "valor_total": str(total),
-            },
-        }
-        if review_payload:
-            response_payload["dados"]["analise_multiagente"] = review_payload
-        db.insert_log(
-            nivel="info",
-            remetente=remetente,
-            mensagem_recebida=mensagem,
-            resposta_enviada=response_payload["mensagem"],
-            contexto=response_payload["dados"],
-        )
-        return response_payload
-
-    return {"mensagem": "Não consegui continuar o fluxo. Vamos reiniciar: compra ou venda?", "dados": {"etapa": "reiniciar"}}
-    if estado == "await_preco_simples":
-        cotacao = _parse_decimal_from_text(mensagem, "preco_usd")
-        if cotacao <= 0:
-            return {"mensagem": "Preço inválido. Informe o preço por grama em USD (ex: 65.50).", "dados": {"etapa": estado}}
-
         quantidade = Decimal(str(contexto["quantidade"]))
         total_usd = money(quantidade * cotacao)
         contexto["cotacao_usd"] = str(cotacao)
@@ -1011,19 +936,54 @@ def _finish_transacao_simples(
     )
     return response_payload
 @app.post("/webhook/whatsapp")
-def whatsapp_webhook(
-    payload: WhatsAppWebhookPayload,
+async def whatsapp_webhook(
+    request: Request,
     x_webhook_token: Optional[str] = Header(default=None, alias="X-Webhook-Token"),
     x_provider_message_id: Optional[str] = Header(default=None, alias="X-Provider-Message-Id"),
     x_twilio_message_sid: Optional[str] = Header(default=None, alias="X-Twilio-MessageSid"),
 ) -> Dict[str, Any]:
     provider_message_id = x_provider_message_id or x_twilio_message_sid
+    body_data: Dict[str, Any] = {}
+    payload: Optional[WhatsAppWebhookPayload] = None
+
+    try:
+        body_data = await request.json()
+        if not body_data:
+            body_data = {}
+    except Exception:
+        body_data = {}
+
+    # Twilio/Pipedream frequently send application/x-www-form-urlencoded.
+    if not body_data:
+        try:
+            form = await request.form()
+            body_data = dict(form)
+        except Exception:
+            body_data = {}
+
+    try:
+        payload = WhatsAppWebhookPayload(
+            remetente=str(body_data.get("remetente") or body_data.get("From") or "").strip(),
+            mensagem=str(body_data.get("mensagem") or body_data.get("Body") or "").strip(),
+        )
+    except ValidationError:
+        raise HTTPException(status_code=400, detail="Payload inválido: informe remetente e mensagem.")
+
+    # Allow token from header, query (?token=...), or body field for easy Pipedream wiring.
+    token = x_webhook_token or request.query_params.get("token") or body_data.get("token")
+    provider_message_id = (
+        provider_message_id
+        or str(body_data.get("provider_message_id") or "").strip()
+        or str(body_data.get("MessageSid") or "").strip()
+        or None
+    )
+
     remetente = payload.remetente.strip()
     mensagem = payload.mensagem.strip()
     db: Optional[DatabaseClient] = None
 
     try:
-        validate_webhook_token(x_webhook_token)
+        validate_webhook_token(str(token) if token is not None else None)
         db = get_db()
 
         if provider_message_id:
