@@ -339,6 +339,55 @@ def _build_whatsapp_checklist_menu() -> str:
     )
 
 
+def _build_caixa_response(db: DatabaseClient) -> Dict[str, Any]:
+    day = _build_day_range(None)
+    summary = db.get_daily_gold_summary(day["start"], day["end"])
+    saldo = db.get_saldo_caixa()
+
+    gold_gramas = saldo.get("gold_gramas", "0")
+    moedas = saldo.get("moedas", {})
+    ops_hoje = int(summary.get("total_operacoes", 0) or 0)
+
+    moeda_simbolo = {"USD": "$", "EUR": "EUR ", "SRD": "SRD ", "BRL": "R$"}
+    moeda_ordem = ["USD", "EUR", "SRD", "BRL"]
+
+    linhas_moeda: List[str] = []
+    for m in moeda_ordem:
+        val_str = moedas.get(m, "0")
+        val = Decimal(str(val_str))
+        simbolo = moeda_simbolo.get(m, m)
+        sinal = "+" if val >= 0 else ""
+        linhas_moeda.append(f"- {m}: {sinal}{simbolo}{val:,.2f}")
+
+    for m, val_str in moedas.items():
+        if m not in moeda_ordem:
+            val = Decimal(str(val_str))
+            sinal = "+" if val >= 0 else ""
+            linhas_moeda.append(f"- {m}: {sinal}{val:,.2f}")
+
+    moedas_txt = "\n".join(linhas_moeda) if linhas_moeda else "Sem movimentações"
+    ouro_val = Decimal(str(gold_gramas))
+    sinal_ouro = "+" if ouro_val >= 0 else ""
+
+    resposta = (
+        f"CAIXA - {day['date']}\n"
+        f"Ouro em estoque: {sinal_ouro}{ouro_val:,.3f} g\n"
+        f"{moedas_txt}\n"
+        f"Operações hoje: {ops_hoje}"
+    )
+    return {
+        "mensagem": resposta,
+        "dados": {
+            "intencao": "consultar_relatorio",
+            "date": day["date"],
+            "gold_gramas": gold_gramas,
+            "moedas": moedas,
+            "ops_hoje": ops_hoje,
+            "summary": summary,
+        },
+    }
+
+
 def _handle_menu_option(remetente: str, mensagem: str, db: DatabaseClient) -> Optional[Dict[str, Any]]:
     option = _normalize_text(mensagem)
     if option not in {"1", "2", "3", "4", "5"}:
@@ -362,10 +411,7 @@ def _handle_menu_option(remetente: str, mensagem: str, db: DatabaseClient) -> Op
 
     if option == "2":
         _clear_session(db, remetente)
-        return {
-            "mensagem": "Certo. Para consultar agora, envie: caixa",
-            "dados": {"acao": "consultar_caixa"},
-        }
+        return _build_caixa_response(db)
 
     if option == "3":
         _clear_session(db, remetente)
@@ -1485,83 +1531,9 @@ def _processar_webhook(
         return response_payload
 
     if intencao == "consultar_relatorio":
-        day = _build_day_range(None)
-        summary = db.get_daily_gold_summary(day["start"], day["end"])
-        by_operator = db.get_daily_gold_summary_by_operator(day["start"], day["end"])
-        total_operacoes = int(summary.get("total_operacoes", 0) or 0)
-        total_usd = summary.get("total_usd", "0")
-        total_pago_usd = summary.get("total_pago_usd", "0")
-        total_diferenca_usd = summary.get("total_diferenca_usd", "0")
-
-        resposta = (
-            "📊 Extrato de hoje\n"
-            f"Operações: {total_operacoes}\n"
-            f"Total USD: {total_usd}\n"
-            f"Total pago USD: {total_pago_usd}\n"
-            f"Diferença USD: {total_diferenca_usd}"
-        )
-        response_payload = {
-            "mensagem": resposta,
-            "dados": {
-                "intencao": intencao,
-                "date": day["date"],
-                "summary": summary,
-                "by_operator": by_operator,
-            },
-        }
-        saldo = db.get_saldo_caixa()
-        gold_gramas = saldo.get("gold_gramas", "0")
-        moedas = saldo.get("moedas", {})
-
-        _MOEDA_SIMBOLO = {"USD": "$", "EUR": "€", "SRD": "Sf", "BRL": "R$"}
-        _MOEDA_FLAG   = {"USD": "💵", "EUR": "💶", "SRD": "🇸🇷", "BRL": "🇧🇷"}
-        _MOEDA_ORDEM  = ["USD", "EUR", "SRD", "BRL"]
-
-        linhas_moeda: list[str] = []
-        for m in _MOEDA_ORDEM:
-            val_str = moedas.get(m, "0")
-            val = Decimal(val_str)
-            simbolo = _MOEDA_SIMBOLO.get(m, m)
-            flag = _MOEDA_FLAG.get(m, "💰")
-            sinal = "+" if val >= 0 else ""
-            linhas_moeda.append(f"{flag} {m}:  {sinal}{simbolo}{val:,.2f}")
-
-        # Also include any unexpected currency in saldo
-        for m, val_str in moedas.items():
-            if m not in _MOEDA_ORDEM:
-                val = Decimal(val_str)
-                sinal = "+" if val >= 0 else ""
-                linhas_moeda.append(f"💰 {m}:  {sinal}{val:,.2f}")
-
-        moedas_txt = "\n".join(linhas_moeda) if linhas_moeda else "Sem movimentações"
-
-        # Today's activity count
-        day = _build_day_range(None)
-        summary = db.get_daily_gold_summary(day["start"], day["end"])
-        ops_hoje = int(summary.get("total_operacoes", 0) or 0)
-
-        ouro_val = Decimal(gold_gramas)
-        sinal_ouro = "+" if ouro_val >= 0 else ""
-
-        resposta = (
-            f"📊 CAIXA — {day['date']}\n"
-            "────────────────────────\n"
-            f"🥇 Ouro em estoque: {sinal_ouro}{ouro_val:,.3f} g\n"
-            "────────────────────────\n"
-            f"{moedas_txt}\n"
-            "────────────────────────\n"
-            f"📈 Operações hoje: {ops_hoje}"
-        )
-        response_payload = {
-            "mensagem": resposta,
-            "dados": {
-                "intencao": intencao,
-                "date": day["date"],
-                "gold_gramas": gold_gramas,
-                "moedas": moedas,
-                "ops_hoje": ops_hoje,
-            },
-        }
+        response_payload = _build_caixa_response(db)
+        resposta = response_payload["mensagem"]
+        day = {"date": str(response_payload["dados"].get("date", ""))}
         db.save_conversation_session(
             remetente=remetente,
             estado="conversando",
