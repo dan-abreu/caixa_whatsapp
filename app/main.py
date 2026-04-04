@@ -2538,7 +2538,7 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
                 source_message_id=contexto.get("source_message_id"),
             )
 
-        _clear_session(db, remetente)
+        _save_session(db, remetente, "await_caixa_detalhe", {"source": "post_operacao"})
         alerta = "" if not risco_diferenca else " ⚠️ Atenção: verificar diferença."
 
         gt_id = gold_transaction.get("id") if isinstance(gold_transaction, dict) else None
@@ -2555,11 +2555,12 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
 
         tipo_operacao = str(contexto.get("tipo_operacao", "compra"))
         direcao_txt = "Saiu" if tipo_operacao == "compra" else "Entrou"
+        direcao_ouro_txt = "Entrou" if tipo_operacao == "compra" else "Saiu"
         peso = Decimal(str(contexto.get("peso", "0")))
         mov_linhas: List[str] = []
         
         # Show ouro movement
-        mov_linhas.append(f"- {direcao_txt} ouro: {peso:,.3f}g")
+        mov_linhas.append(f"- {direcao_ouro_txt} ouro: {peso:,.3f}g")
         
         # Show cada moeda movement (no USD reference)
         for pagamento in pagamentos:
