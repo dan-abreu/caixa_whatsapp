@@ -1,257 +1,244 @@
-# Caixa Inteligente via WhatsApp
+# Caixa Inteligente WhatsApp
 
-Backend em Python + FastAPI para operar caixa multimoeda (USD, EUR, SRD, BRL, XAU) via WhatsApp, com persistência em Supabase e extração de intenção por IA.
+Sistema backend em Python com FastAPI para operar compra e venda de ouro via WhatsApp, com controle de 5 caixas independentes (`XAU`, `USD`, `EUR`, `SRD`, `BRL`), persistência em Supabase e apoio de IA para interpretação de mensagens.
 
-## Resumo
+## O que já está pronto
 
-O sistema recebe mensagens de WhatsApp, interpreta intenção e executa regras de negócio no backend (com Decimal), incluindo:
+- API principal estruturada em `app/` com entrypoint `app.main:app`.
+- Fluxo guiado de operação (compra/venda) com etapas, validações e confirmação final.
+- Menu conversacional (`menu`) com ações operacionais.
+- Atualização de taxa com controle de permissão (admin).
+- Edição e cancelamento de operação por comando.
+- Extrato por período e relatórios de fechamento/risco.
+- Caixa segregado por moeda/commodity (sem consolidar tudo em USD).
+- Integração com webhook JSON e webhook Twilio.
+- Scripts de setup, execução, simulação e schema.
 
-- Registro de operação com fluxo guiado
-- Taxas e câmbio manual com validação
-- Caixa multimoeda e subcaixa por moeda
-- Recibo com ID único
-- Edição/cancelamento de operação por comando
-- Onboarding por nome e menu numerado
+## Estrutura atual
 
-## Stack
-
-- Python 3.11-3.13 (recomendado 3.12 no Windows)
-- FastAPI
-- Supabase (PostgreSQL)
-- Google Gemini API
-- Twilio WhatsApp (integração direta)
-
-## Estrutura do Projeto
-
-- `main.py`: API e regras de negócio
-- `database.py`: acesso a dados (supabase-py)
-- `ai_service.py`: extração de dados via IA
-- `schema.sql`: DDL + seed inicial
-- `requirements.txt`: dependências
-- `setup.ps1`, `run.ps1`: automação local no Windows
-- `simulate_whatsapp.py`, `invoke_whatsapp.ps1`: testes locais
-- `.env.example`: variáveis de ambiente
-
-## Configuração Local
-
-### 1) Ambiente virtual
-
-```powershell
-py -3.12 -m venv .venv
-.\.venv\Scripts\Activate.ps1
+```text
+caixa_whatsapp/
+|- app/
+|  |- __init__.py
+|  |- ai_intents_lexicon.json
+|  |- ai_service.py
+|  |- database.py
+|  |- main.py
+|  |- multi_agent_system.py
+|- scripts/
+|  |- apply_schema.ps1
+|  |- apply_schema.py
+|  |- backfill_caixas.py
+|  |- register_autostart.ps1
+|  |- simulate_whatsapp.py
+|  |- start_background.ps1
+|  |- status_background.ps1
+|  |- stop_background.ps1
+|- sql/
+|  |- schema.sql
+|  |- schema_caixas.sql
+|  |- schema_enterprise_upgrade.sql
+|- tests/
+|- setup.ps1
+|- run.ps1
+|- invoke_whatsapp.ps1
+|- requirements.txt
+|- .env.example
 ```
 
-Opcional:
+## Requisitos
+
+- Windows PowerShell 5.1+
+- Python 3.12 (recomendado)
+- Supabase (URL e chave de serviço)
+- Chave Gemini para IA
+
+## Setup rápido
+
+1. Criar ambiente e instalar dependências:
 
 ```powershell
-.\setup.ps1 -RecreateVenv
+.\setup.ps1
 ```
 
-### 2) Dependências
+1. Copiar e preencher variáveis:
 
 ```powershell
-pip install -r requirements.txt
+Copy-Item .env.example .env
 ```
 
-### 3) Variáveis de ambiente
-
-Copie `.env.example` para `.env` e preencha.
-
-Obrigatórias:
-
-- `SUPABASE_URL`
-- `SUPABASE_SERVICE_ROLE_KEY` (ou `SUPABASE_KEY`)
-- `GEMINI_API_KEY`
-- `WEBHOOK_TOKEN`
-
-Importantes:
-
-- `GEMINI_MODEL` (default: `gemini-2.5-flash`)
-- `TZ_OFFSET_HOURS` (default: `-3`)
-- `LOG_LEVEL` (default: `INFO`)
-- `MULTI_AGENT_AUTO_ENABLED` (default: `true`)
-- `GUIDED_SESSION_IDLE_MINUTES` (default: `5`) tempo para o bot perguntar se deve continuar a transação ou cancelar após inatividade
-
-Twilio debug control:
-
-- `TWILIO_REPLY_MODE=normal|silent_prefix|silent_all`
-- `TWILIO_SILENT_PREFIX=debug:`
-
-## Banco de Dados
-
-Execute `schema.sql` no Supabase.
-
-Opcional (se configurado):
-
-```powershell
-.\apply_schema.ps1
-```
-
-Tabelas principais:
-
-- `usuarios`, `ativos`, `taxas_diarias`, `transacoes`, `logs`
-- `sessoes_conversa`, `mensagens_processadas`
-- `gold_transactions`, `gold_payments`
-- `caixas`, `caixas_movimentacoes`
-
-## Execução da API
-
-```powershell
-uvicorn main:app --reload --host 127.0.0.1 --port 8000
-```
-
-Ou:
+1. Subir API:
 
 ```powershell
 .\run.ps1
 ```
 
-Health check:
+Sem reload (útil para execução estável):
+
+```powershell
+.\run.ps1 -NoReload
+```
+
+## Variáveis de ambiente
+
+Obrigatórias:
+
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_ROLE_KEY` (ou `SUPABASE_KEY`)
+- `WEBHOOK_TOKEN`
+- `GEMINI_API_KEY`
+
+Principais opcionais:
+
+- `APP_HOST` (default: `127.0.0.1`)
+- `APP_PORT` (default: `8000`)
+- `GEMINI_MODEL` (default: `gemini-2.5-flash`)
+- `LOG_LEVEL` (default: `INFO`)
+- `TZ_OFFSET_HOURS` (default: `-3`)
+- `GUIDED_SESSION_IDLE_MINUTES` (default: `5`)
+- `RISK_DIFF_LIMIT_USD` (default: `250`)
+- `MULTI_AGENT_AUTO_ENABLED` (default: `true`)
+- `MULTI_AGENT_AUTO_MIN_USD` (default: `500`)
+- `MULTI_AGENT_AUTO_MIN_WEIGHT_GRAMS` (default: `10`)
+- `AI_CONF_SAMPLES_TARGET` (default: `300`)
+- `AI_CONF_RISK_WEIGHT` (default: `0.7`)
+- `AI_CONF_FAILSAFE_WEIGHT` (default: `1.3`)
+- `AI_CONF_WEIGHT_MATURITY` (default: `45`)
+- `AI_CONF_WEIGHT_STABILITY` (default: `45`)
+- `AI_CONF_WEIGHT_ALERTS` (default: `10`)
+- `AI_CONF_BAND_EXCELLENT` (default: `85`)
+- `AI_CONF_BAND_GOOD` (default: `70`)
+- `AI_CONF_BAND_MODERATE` (default: `50`)
+- `AI_CONF_PROFILE` (`balanced`, `conservative`, `aggressive`, `auto`; default: `balanced`)
+- `TWILIO_REPLY_MODE` (`normal`, `silent_prefix`, `silent_all`)
+- `TWILIO_SILENT_PREFIX` (default: `debug:`)
+- `AI_LEXICON_PATH` (override opcional do léxico)
+
+Notas de governança do confidence score:
+
+- `AI_CONF_PROFILE` define defaults operacionais para o score (pesos, metas e faixas).
+- `AI_CONF_PROFILE=auto` aplica roteamento por maturidade historica:
+  - seed (`< 30` amostras): `aggressive`
+  - learning/stable (`30-299` amostras): `balanced`
+  - advanced (`>= 300` amostras): `conservative`
+- Qualquer variável `AI_CONF_*` individual definida no ambiente sobrescreve o preset ativo.
+
+## Banco de dados
+
+Aplicar schema principal:
+
+```powershell
+.\scripts\apply_schema.ps1
+```
+
+ou via Python:
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\apply_schema.py
+```
+
+Para ambientes antigos, se necessário recalcular saldos dos 5 caixas:
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\backfill_caixas.py
+```
+
+## Endpoints já implementados
+
+Base local: `http://127.0.0.1:8000`
+
+Saúde e menu:
 
 - `GET /health`
+- `GET /menu`
 
-## Webhooks
-
-### JSON webhook (integrações/API)
+Webhooks:
 
 - `POST /webhook/whatsapp`
-- Token via `X-Webhook-Token` ou `?token=`
+- `POST /webhook/twilio`
 
-Body exemplo:
+Relatórios:
+
+- `GET /reports/daily-closure`
+- `GET /reports/risk-alerts`
+- `GET /reports/closure-range`
+- `GET /reports/reconciliation-by-currency`
+- `GET /reports/closure-csv`
+- `GET /reports/top-divergences`
+- `GET /reports/audit/operation/{operation_id}`
+
+Multiagente:
+
+- `POST /ai/multi-agent/analyze`
+- `GET /ai/multi-agent/runs`
+
+Operações:
+
+- `POST /operations/{operation_id}/edit`
+
+## Teste rápido de webhook
+
+Com script PowerShell:
+
+```powershell
+.\invoke_whatsapp.ps1 -Remetente "+59711111111" -Mensagem "menu"
+```
+
+Exemplo de corpo JSON para `POST /webhook/whatsapp`:
 
 ```json
 {
-  "remetente": "+5598991438754",
-  "mensagem": "comprei 10 gramas de ouro"
+  "remetente": "+59711111111",
+  "mensagem": "compra"
 }
 ```
 
-### Twilio direto (produção WhatsApp)
+Header necessário:
 
-- `POST /webhook/twilio?token=SEU_TOKEN`
-- Espera payload `application/x-www-form-urlencoded`
-- Responde TwiML XML
+- `X-Webhook-Token: <valor de WEBHOOK_TOKEN>`
 
-URL recomendada no Twilio Sandbox:
+## Comandos conversacionais principais
 
-`https://SEU-APP.railway.app/webhook/twilio?token=SEU_TOKEN`
-
-## Fluxo Guiado de Operação
-
-Exemplo de jornada completa:
-
-1. Tipo (`compra`/`venda`)
-2. Origem (`balcao`/`fora`)
-3. Teor (`0` a `99.99`)
-4. Peso (gramas)
-5. Moeda base de preço (`USD`, `EUR`, `SRD`, `BRL`)
-6. Preço por grama na moeda escolhida
-7. Câmbio para USD (se não for USD)
-8. Moeda(s) de pagamento e valores
-9. Fechamento, pessoa, forma de pagamento, observações
-10. Confirmação e gravação
-
-Durante o fluxo, o bot mostra cálculos parciais (total, parcial pago, restante e diferença).
-
-## Correção sem Cancelar
-
-Durante uma operação ativa, você pode corrigir etapa específica:
-
-- `voltar peso`
-- `voltar preco`
-- `voltar teor`
-- `voltar moedas`
-- `voltar pagamento`
-- `voltar fechamento`
-- `voltar` (uma etapa anterior)
-
-## Menu no WhatsApp
-
-Comandos como `menu`, `ajuda`, `comandos` mostram checklist numerado.
-
-Principais opções:
-
-1. Registrar operação
-2. Consultar caixa/extrato
-3. Atualizar taxa (admin)
-4. Editar operação
-5. Cancelar operação
-
-## Comandos Naturais de Gestão
-
-Editar operação:
-
-- `editar 123 preco 110`
-- `editar 123 quantidade 2.5`
-- `editar OP-20260403-00123 moeda EUR`
-
-Cancelar operação:
-
-- `cancelar 123`
-- `cancelar OP-20260403-00123`
-
-Permissão: admin ou operador dono da operação.
-
-## Caixa e Subcaixa
-
-Visão geral:
-
+- `menu`
+- `compra`
+- `venda`
 - `caixa`
+- `extrato`
+- `taxa ouro 70`
+- `editar 123 preco 110`
+- `cancelar 123`
+- `voltar` (durante fluxo guiado)
 
-Subcaixa por moeda:
+## Scripts úteis
 
-- `caixa usd`
-- `caixa eur`
-- `caixa srd`
-- `caixa brl`
-- `caixa xau` (ou `caixa ouro`)
+- Inicialização em background: `scripts/start_background.ps1`
+- Status local (API + ngrok): `scripts/status_background.ps1`
+- Parar serviços: `scripts/stop_background.ps1`
+- Simular mensagem via Python: `scripts/simulate_whatsapp.py`
+- Registrar tarefa de autostart no Windows: `scripts/register_autostart.ps1`
 
-Para `XAU`, o sistema mostra saldo em gramas e referência em USD com base na última cotação.
-Para `XAU`, o sistema mostra saldo em gramas. Os 5 caixas são independentes (`XAU`, `USD`, `EUR`, `SRD`, `BRL`), sem referência única em USD.
+## Testes no repositório
 
-Se seu ambiente já existia antes da criação dos 5 caixas, execute também:
+Existem suites e smoke tests em `tests/`, incluindo:
 
-```powershell
-.\.venv\Scripts\python.exe .\backfill_caixas.py
-```
+- `test_comprehensive.py`
+- `test_caixas.py`
+- `test_menu_options.ps1`
+- `smoke_enterprise.ps1`
+- `hundred_test.ps1`
 
-## Testes Locais Rápidos
+## Deploy
 
-PowerShell:
-
-```powershell
-.\invoke_whatsapp.ps1 -Remetente "+5598991438754" -Mensagem "menu"
-```
-
-Curl (JSON webhook):
+Compatível com Railway/Procfile usando:
 
 ```bash
-curl -X POST "http://127.0.0.1:8000/webhook/whatsapp?token=SEU_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d "{\"remetente\":\"+5598991438754\",\"mensagem\":\"caixa eur\"}"
+uvicorn app.main:app --host 0.0.0.0 --port $PORT
 ```
 
-## Segurança e Observabilidade
+## Observações finais
 
-- Token obrigatório em webhook
-- Controle de autorização por telefone ativo
-- Restrição de atualização de taxa para admin
-- Logs de entrada/saída e erros em banco
-- Idempotência por `provider_message_id`
-
-## Roadmap Recomendado
-
-- Estorno formal (ao invés de edição direta) para trilha contábil
-- Fechamento diário por moeda (abertura/entradas/saídas/fechamento)
-- Assinatura HMAC para webhook Twilio
-- Testes automatizados (unitário + integração)
-- Observabilidade estruturada (métricas, tracing)
-
----
-
-## English Quick Guide
-
-### What This Project Does
+- O projeto já está reorganizado e funcional com código principal em `app/`.
+- O README foi recriado para refletir o estado atual real do código e scripts.
 
 This backend processes WhatsApp messages and runs multi-currency cash operations (USD, EUR, SRD, BRL, XAU) using FastAPI + Supabase.
 
@@ -295,7 +282,7 @@ Twilio debug controls:
 py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-uvicorn main:app --reload --host 127.0.0.1 --port 8000
+uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
 ### Useful WhatsApp Commands
@@ -347,4 +334,4 @@ Copyright (c) 2026 Daniel Abreu. All rights reserved.
 
 For business, partnerships, or technical collaboration, contact the project owner through GitHub:
 
-- https://github.com/dan-abreu
+- <https://github.com/dan-abreu>

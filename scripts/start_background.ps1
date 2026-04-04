@@ -1,6 +1,6 @@
 $ErrorActionPreference = "Stop"
 
-$repo = Split-Path -Parent $MyInvocation.MyCommand.Path
+$repo = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $repo
 
 function Import-DotEnv {
@@ -44,7 +44,7 @@ Get-Process -Name python,pythonw,ngrok -ErrorAction SilentlyContinue | Stop-Proc
 
 # Start API in background
 Start-Process -FilePath $pythonExe -WindowStyle Hidden -WorkingDirectory $repo -ArgumentList @(
-  "-m", "uvicorn", "main:app", "--host", "127.0.0.1", "--port", "8000"
+    "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000"
 ) -RedirectStandardOutput $apiOutLog -RedirectStandardError $apiErrLog
 
 # Start ngrok in background
@@ -54,4 +54,4 @@ Start-Process -FilePath "ngrok.exe" -WindowStyle Hidden -WorkingDirectory $repo 
 
 Start-Sleep -Seconds 3
 Write-Host "Background services started."
-Write-Host "Run .\\status_background.ps1 to check health and ngrok URL."
+Write-Host "Run .\\scripts\\status_background.ps1 to check health and ngrok URL."

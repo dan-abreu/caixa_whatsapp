@@ -295,7 +295,7 @@ def _sanitize_extracted_payload(message: str, payload: Dict[str, Any]) -> Dict[s
                 "ativo": None,
                 "quantidade": None,
                 "valor_informado": None,
-                "resposta": "Para registrar operação, envie algo como: Comprei 2g de ouro a 105",
+                "resposta": "Para registrar operação, use termos do sistema, por exemplo: 'compra ouro 2g', 'venda ouro 1.5g' ou apenas 'compra' para iniciar o fluxo guiado.",
             }
         return {
             "intencao": "registrar_operacao",
@@ -368,7 +368,7 @@ def _heuristic_extract(message: str) -> Dict[str, Any]:
             "ativo": None,
             "quantidade": None,
             "valor_informado": None,
-            "resposta": "Entendi operação, mas preciso de quantidade e ativo. Ex.: 'Comprei 2g de ouro'.",
+            "resposta": "Entendi a operação, mas preciso de quantidade e ativo. Ex.: 'compra ouro 2g' ou 'venda ouro 1g'.",
         }
 
     return {
@@ -376,7 +376,7 @@ def _heuristic_extract(message: str) -> Dict[str, Any]:
         "ativo": None,
         "quantidade": None,
         "valor_informado": None,
-        "resposta": "Posso ajudar em português, inglês e espanhol. Diga, por exemplo: 'Comprei 2g de ouro' ou 'Taxa USD 5.40'.",
+        "resposta": "Atendimento disponível em português, inglês e espanhol. Você pode usar termos do sistema, por exemplo: 'compra', 'venda', 'caixa', 'extrato' ou 'taxa ouro 70.00'.",
     }
 
 

@@ -20,11 +20,11 @@ $BaseUrl = 'http://127.0.0.1:8000'
 $pythonExe = '.\.venv\Scripts\python.exe'
 
 # Create deterministic authorized test users to isolate server-side session cache per phone.
-& $pythonExe -c "from database import DatabaseClient; db=DatabaseClient(); users=[('+59720000001','Teste Op 1','operador'),('+59720000002','Teste Op 2','operador'),('+59720000003','Teste Op 3','operador'),('+59720000004','Teste Op 4','operador'),('+59720000005','Teste Op 5','operador'),('+59720000006','Teste Op 6','operador'),('+59700000000','Administrador','admin')]; [db.client.table('usuarios').upsert({'telefone':p,'nome':n,'tipo_usuario':t,'ativo':True}, on_conflict='telefone').execute() for p,n,t in users]" | Out-Null
+& $pythonExe -c "from app.database import DatabaseClient; db=DatabaseClient(); users=[('+59720000001','Teste Op 1','operador'),('+59720000002','Teste Op 2','operador'),('+59720000003','Teste Op 3','operador'),('+59720000004','Teste Op 4','operador'),('+59720000005','Teste Op 5','operador'),('+59720000006','Teste Op 6','operador'),('+59700000000','Administrador','admin')]; [db.client.table('usuarios').upsert({'telefone':p,'nome':n,'tipo_usuario':t,'ativo':True}, on_conflict='telefone').execute() for p,n,t in users]" | Out-Null
 
 function Clear-Session {
   param([string]$Phone)
-  & $pythonExe -c "from database import DatabaseClient; db=DatabaseClient(); db.clear_conversation_session('$Phone')" | Out-Null
+  & $pythonExe -c "from app.database import DatabaseClient; db=DatabaseClient(); db.clear_conversation_session('$Phone')" | Out-Null
 }
 
 function Send-Webhook {

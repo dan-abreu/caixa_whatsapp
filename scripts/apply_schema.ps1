@@ -1,6 +1,6 @@
 param(
     [string]$DatabaseUrl,
-    [string]$SchemaPath = ".\schema.sql"
+    [string]$SchemaPath = ".\sql\schema.sql"
 )
 
 $ErrorActionPreference = "Stop"
@@ -47,7 +47,7 @@ function Get-DatabaseUrl {
     throw "Informe -DatabaseUrl ou configure SUPABASE_DB_URL. Alternativamente, configure SUPABASE_PROJECT_REF e SUPABASE_DB_PASSWORD."
 }
 
-$RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+$RepoRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $RepoRoot
 Import-DotEnv -Path (Join-Path $RepoRoot ".env")
 

@@ -24,7 +24,7 @@ if (-not (Test-Path $pythonExe)) {
 }
 
 # Limpa sessões para execução determinística.
-& $pythonExe -c "from database import DatabaseClient; db=DatabaseClient(); [db.clear_conversation_session(p) for p in ['+559891438754','+59711111111','+59700000000']]"
+& $pythonExe -c "from app.database import DatabaseClient; db=DatabaseClient(); [db.clear_conversation_session(p) for p in ['+559891438754','+59711111111','+59700000000']]"
 
 function Invoke-Webhook {
   param(

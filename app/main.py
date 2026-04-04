@@ -11,9 +11,9 @@ from urllib.parse import parse_qs
 from fastapi import FastAPI, Header, HTTPException, Request, Response
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
-from ai_service import AIServiceError, extract_message_data
-from database import DatabaseClient, DatabaseError
-from multi_agent_system import MultiAgentRequest, MultiAgentResponse, run_multi_agent_orchestration
+from app.ai_service import AIServiceError, extract_message_data
+from app.database import DatabaseClient, DatabaseError
+from app.multi_agent_system import MultiAgentRequest, MultiAgentResponse, run_multi_agent_orchestration
 
 
 class WhatsAppWebhookPayload(BaseModel):
@@ -152,9 +152,9 @@ def menu() -> Dict[str, Any]:
                 "intencao": "registrar_operacao",
                 "descricao": "Registra operacao de ouro com passos guiados.",
                 "exemplos": [
-                    "Comprei 2g de ouro",
-                    "Vendi 3g de ouro",
-                    "Comprei 2g de ouro a 105"
+                    "compra",
+                    "venda",
+                    "compra ouro 2g"
                 ],
                 "resposta_esperada": "Retorna comprovante da operacao."
             },
@@ -222,7 +222,7 @@ def menu() -> Dict[str, Any]:
 
 
 _ERROS_AMIGAVEIS: Dict[int, str] = {
-    400: "Não entendi. Tente assim: Comprei 2g de ouro a 105",
+    400: "Não entendi. Tente assim: compra | venda | caixa | extrato | taxa ouro 70.00",
     401: "Acesso negado. Token inválido.",
     403: "Você não tem permissão para isso.",
     404: "Recurso não encontrado. Digite 'menu' para ver as opções.",
@@ -235,12 +235,117 @@ _ERROS_AMIGAVEIS: Dict[int, str] = {
 _IDEMPOTENCY_CACHE: Dict[str, Dict[str, Any]] = {}
 _SESSION_CACHE: Dict[str, Dict[str, Any]] = {}
 
+
+def _env_int(name: str, default: int, minimum: Optional[int] = None, maximum: Optional[int] = None) -> int:
+    raw = os.getenv(name, str(default)).strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        value = default
+    if minimum is not None:
+        value = max(minimum, value)
+    if maximum is not None:
+        value = min(maximum, value)
+    return value
+
+
+def _env_float(name: str, default: float, minimum: Optional[float] = None, maximum: Optional[float] = None) -> float:
+    raw = os.getenv(name, str(default)).strip().replace(",", ".")
+    try:
+        value = float(raw)
+    except ValueError:
+        value = default
+    if minimum is not None:
+        value = max(minimum, value)
+    if maximum is not None:
+        value = min(maximum, value)
+    return value
+
+
 _MOEDAS_SUPORTADAS = ["USD", "SRD", "EUR", "BRL"]
 _RISK_DIFF_LIMIT_USD = Decimal(os.getenv("RISK_DIFF_LIMIT_USD", "250"))
 _GUIDED_SESSION_IDLE_MINUTES = int(os.getenv("GUIDED_SESSION_IDLE_MINUTES", "5"))
 _MULTI_AGENT_AUTO_ENABLED = os.getenv("MULTI_AGENT_AUTO_ENABLED", "true").strip().lower() not in {"0", "false", "no"}
 _MULTI_AGENT_AUTO_MIN_USD = Decimal(os.getenv("MULTI_AGENT_AUTO_MIN_USD", "500"))
 _MULTI_AGENT_AUTO_MIN_WEIGHT_GRAMS = Decimal(os.getenv("MULTI_AGENT_AUTO_MIN_WEIGHT_GRAMS", "10"))
+_AI_CONF_PRESETS: Dict[str, Dict[str, float]] = {
+    "balanced": {
+        "samples_target": 300,
+        "risk_weight": 0.7,
+        "failsafe_weight": 1.3,
+        "weight_maturity": 45,
+        "weight_stability": 45,
+        "weight_alerts": 10,
+        "band_excellent": 85,
+        "band_good": 70,
+        "band_moderate": 50,
+    },
+    "conservative": {
+        "samples_target": 450,
+        "risk_weight": 0.9,
+        "failsafe_weight": 1.8,
+        "weight_maturity": 35,
+        "weight_stability": 55,
+        "weight_alerts": 10,
+        "band_excellent": 90,
+        "band_good": 78,
+        "band_moderate": 60,
+    },
+    "aggressive": {
+        "samples_target": 220,
+        "risk_weight": 0.55,
+        "failsafe_weight": 1.0,
+        "weight_maturity": 55,
+        "weight_stability": 35,
+        "weight_alerts": 10,
+        "band_excellent": 82,
+        "band_good": 66,
+        "band_moderate": 45,
+    },
+}
+_ai_conf_profile_setting = os.getenv("AI_CONF_PROFILE", "balanced").strip().lower()
+if _ai_conf_profile_setting not in {*_AI_CONF_PRESETS.keys(), "auto"}:
+    _ai_conf_profile_setting = "balanced"
+_AI_CONF_PROFILE_SETTING = _ai_conf_profile_setting
+
+
+def _resolve_auto_ai_conf_profile(total_samples: int) -> str:
+    if total_samples >= 300:
+        return "conservative"
+    if total_samples >= 30:
+        return "balanced"
+    return "aggressive"
+
+
+def _get_ai_conf_config(total_samples: int) -> Dict[str, Any]:
+    selected_profile = _AI_CONF_PROFILE_SETTING
+    if selected_profile == "auto":
+        selected_profile = _resolve_auto_ai_conf_profile(total_samples)
+
+    defaults = _AI_CONF_PRESETS[selected_profile]
+    samples_target = _env_int("AI_CONF_SAMPLES_TARGET", int(defaults["samples_target"]), minimum=50, maximum=5000)
+    risk_weight = _env_float("AI_CONF_RISK_WEIGHT", float(defaults["risk_weight"]), minimum=0.0, maximum=5.0)
+    failsafe_weight = _env_float("AI_CONF_FAILSAFE_WEIGHT", float(defaults["failsafe_weight"]), minimum=0.0, maximum=5.0)
+    weight_maturity = _env_float("AI_CONF_WEIGHT_MATURITY", float(defaults["weight_maturity"]), minimum=0.0, maximum=100.0)
+    weight_stability = _env_float("AI_CONF_WEIGHT_STABILITY", float(defaults["weight_stability"]), minimum=0.0, maximum=100.0)
+    weight_alerts = _env_float("AI_CONF_WEIGHT_ALERTS", float(defaults["weight_alerts"]), minimum=0.0, maximum=100.0)
+    band_excellent = _env_int("AI_CONF_BAND_EXCELLENT", int(defaults["band_excellent"]), minimum=1, maximum=100)
+    band_good = _env_int("AI_CONF_BAND_GOOD", int(defaults["band_good"]), minimum=1, maximum=100)
+    band_moderate = _env_int("AI_CONF_BAND_MODERATE", int(defaults["band_moderate"]), minimum=1, maximum=100)
+
+    return {
+        "profile_setting": _AI_CONF_PROFILE_SETTING,
+        "profile_effective": selected_profile,
+        "samples_target": samples_target,
+        "risk_weight": risk_weight,
+        "failsafe_weight": failsafe_weight,
+        "weight_maturity": weight_maturity,
+        "weight_stability": weight_stability,
+        "weight_alerts": weight_alerts,
+        "band_excellent": band_excellent,
+        "band_good": band_good,
+        "band_moderate": band_moderate,
+    }
 _GUIDED_FLOW_STATES = {
     "await_menu_option",
     "await_menu_tipo_operacao",
@@ -868,7 +973,7 @@ def _build_whatsapp_checklist_menu() -> str:
         "MENU\n"
         "──────────────────\n"
         "1) Registrar compra ou venda\n"
-        "   Ex: Comprei 2g de ouro a 105\n\n"
+        "   Ex: compra | venda | compra ouro 2g\n\n"
         "2) Consultar saldo\n"
         "   Ex: caixa | caixa eur | caixa srd | caixa xau\n\n"
         "3) Extrato detalhado\n"
@@ -1214,9 +1319,9 @@ def _get_session(db: DatabaseClient, remetente: str) -> Optional[Dict[str, Any]]
         return cached
     db_session = db.get_conversation_session(remetente)
     if db_session and isinstance(db_session.get("contexto"), dict):
-        session = {
+        session: Dict[str, Any] = {
             "estado": db_session.get("estado", ""),
-            "contexto": db_session["contexto"],
+            "contexto": cast(Dict[str, Any], db_session["contexto"]),
             "atualizado_em": db_session.get("atualizado_em"),
         }
         _SESSION_CACHE[remetente] = session
@@ -1574,6 +1679,23 @@ def _advance_after_payment_exchange(
     tipo_operacao_ctx = str(contexto.get("tipo_operacao", "compra"))
     fx_notice = "\nObs: referência em USD estimada (sem câmbio explícito informado)." if contexto.get("fx_auto_assumido") else ""
 
+    # Determine display currency: use preco_moeda when all payments are in that currency.
+    preco_moeda_disp = str(contexto.get("preco_moeda", "USD")).upper()
+    total_moeda_disp = Decimal(str(contexto.get("total_moeda", "0")))
+    all_in_preco_moeda = (
+        preco_moeda_disp != "USD"
+        and total_moeda_disp > 0
+        and all(str(p.get("moeda", "")).upper() == preco_moeda_disp for p in pagamentos)
+    )
+    if all_in_preco_moeda:
+        display_pago = sum((Decimal(str(p["valor_moeda"])) for p in pagamentos), Decimal("0"))
+        display_diferenca = total_moeda_disp - display_pago
+        display_moeda = preco_moeda_disp
+    else:
+        display_pago = total_pago
+        display_diferenca = total_operacao - total_pago
+        display_moeda = "USD"
+
     if tipo_operacao_ctx == "compra":
         peso_ctx = Decimal(str(contexto.get("peso", "0")))
         contexto["fechamento_gramas"] = str(money(peso_ctx))
@@ -1581,8 +1703,8 @@ def _advance_after_payment_exchange(
         _save_session(db, remetente, "await_pessoa", contexto)
         return {
             "mensagem": (
-                f"Total pago: {money(total_pago)} USD.\n"
-                f"Diferença atual: {money(total_operacao - total_pago)} USD.\n"
+                f"Total pago: {money(display_pago)} {display_moeda}.\n"
+                f"Diferença atual: {money(display_diferenca)} {display_moeda}.\n"
                 f"Nome do vendedor (de quem você comprou)?{fx_notice}"
             ),
             "dados": {"etapa": "await_pessoa"},
@@ -1591,8 +1713,8 @@ def _advance_after_payment_exchange(
     _save_session(db, remetente, "await_fechamento_gramas", contexto)
     return {
         "mensagem": (
-            f"Total pago: {money(total_pago)} USD.\n"
-            f"Diferença atual: {money(total_operacao - total_pago)} USD.\n"
+            f"Total pago: {money(display_pago)} {display_moeda}.\n"
+            f"Diferença atual: {money(display_diferenca)} {display_moeda}.\n"
             f"Informe as gramas fechadas.{fx_notice}"
         ),
         "dados": {"etapa": "await_fechamento_gramas"},
@@ -1934,7 +2056,9 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
         if preco_moeda != "USD" and str(moeda_atual).upper() == preco_moeda:
             cambio_auto = db.get_last_cambio_para_usd(preco_moeda)
             cambio_auto_dec = Decimal(str(cambio_auto)) if (cambio_auto and cambio_auto > 0) else Decimal("1")
-            contexto["fx_auto_assumido"] = not (cambio_auto and cambio_auto > 0)
+            # Paying in the same currency as the price: no FX assumption — cambio 1:1 is exact,
+            # not an estimate. Only flag fx_auto_assumido for cross-currency fallbacks.
+            contexto["fx_auto_assumido"] = False
             valor_usd_auto = money(valor_moeda / cambio_auto_dec)
             pagamentos[-1]["cambio_para_usd"] = str(cambio_auto_dec)
             pagamentos[-1]["valor_usd"] = str(valor_usd_auto)
@@ -2165,6 +2289,7 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
             "diferenca_usd": str(diferenca),
             "fechamento_gramas": contexto.get("fechamento_gramas"),
             "forma_pagamento": str(contexto.get("forma_pagamento", "dinheiro")),
+            "pagamentos": pagamentos,
             "transacao_id": transacao.get("id"),
         }
         if _should_trigger_multi_agent_review(review_transaction, force=risco_diferenca):
@@ -2181,7 +2306,7 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
         alerta = "" if not risco_diferenca else " ⚠️ Atenção: verificar diferença."
 
         gt_id = gold_transaction.get("id") if isinstance(gold_transaction, dict) else None
-        tx_id = transacao.get("id") if isinstance(transacao, dict) else None
+        tx_id = transacao.get("id")
         if gt_id:
             id_linha = f"ID: GT-{gt_id}\n"
         elif tx_id:
@@ -2405,6 +2530,14 @@ def _finish_transacao_simples(
         "valor_total": str(total_usd),
         "total_usd": str(total_usd),
         "total_pago_usd": str(total_usd),
+        "pagamentos": [
+            {
+                "moeda": moeda,
+                "valor_moeda": str(valor_moeda),
+                "cambio_para_usd": str(cambio),
+                "valor_usd": str(total_usd),
+            }
+        ],
     }
     if _should_trigger_multi_agent_review(review_transaction):
         review_payload = _run_automatic_multi_agent_review(
@@ -2830,6 +2963,387 @@ def multi_agent_recent_runs(limit: int = 10) -> Dict[str, Any]:
     }
 
 
+def _compute_ai_window_metrics(db: DatabaseClient, days: int) -> Dict[str, Any]:
+    window_days = max(1, days)
+    now_utc = datetime.now(timezone.utc)
+    start_iso = (now_utc - timedelta(days=window_days)).isoformat()
+    end_iso = now_utc.isoformat()
+
+    runs = db.get_multi_agent_runs_range(start_iso, end_iso, limit=1000)
+    learning_snapshot = db.get_transaction_learning_snapshot(lookback_days=window_days)
+    alerts = db.get_risk_alerts(start_iso, end_iso)
+
+    runs_with_risk = 0
+    runs_with_fail_safe = 0
+    total_risks = 0
+
+    for run in runs:
+        response_payload = cast(Dict[str, Any], run.get("response_payload") or {})
+        risks = cast(List[Any], response_payload.get("risks") or [])
+        transcript = cast(List[Any], response_payload.get("transcript") or [])
+
+        if risks:
+            runs_with_risk += 1
+            total_risks += len(risks)
+
+        has_fail_safe = False
+        for item in transcript:
+            if isinstance(item, dict):
+                item_dict = cast(Dict[str, Any], item)
+                if str(item_dict.get("role", "")).lower() == "fail-safe":
+                    has_fail_safe = True
+                    break
+        if has_fail_safe:
+            runs_with_fail_safe += 1
+
+    total_runs = len(runs)
+    risk_ratio = round(runs_with_risk / total_runs, 4) if total_runs else 0.0
+    fail_safe_ratio = round(runs_with_fail_safe / total_runs, 4) if total_runs else 0.0
+    avg_risks_per_run = round(total_risks / total_runs, 4) if total_runs else 0.0
+    confidence = _compute_ai_confidence_score(
+        total_samples=int(learning_snapshot.get("total_samples", 0) or 0),
+        risk_ratio=risk_ratio,
+        fail_safe_ratio=fail_safe_ratio,
+        risk_alerts=len(alerts),
+        total_runs=total_runs,
+    )
+    total_samples = int(learning_snapshot.get("total_samples", 0) or 0)
+    learning_phase = "seed"
+    if total_samples >= 300:
+        learning_phase = "advanced"
+    elif total_samples >= 30:
+        learning_phase = "learning_stable"
+
+    return {
+        "window_days": window_days,
+        "range": {"start": start_iso, "end": end_iso},
+        "runs": total_runs,
+        "runs_with_risk": runs_with_risk,
+        "runs_with_fail_safe": runs_with_fail_safe,
+        "risk_ratio": risk_ratio,
+        "fail_safe_ratio": fail_safe_ratio,
+        "avg_risks_per_run": avg_risks_per_run,
+        "risk_alerts": len(alerts),
+        "learning_samples": total_samples,
+        "learning_phase": learning_phase,
+        "confidence_score": confidence["score"],
+        "confidence_band": confidence["band"],
+        "confidence_profile": confidence["profile"],
+        "confidence_profile_mode": confidence["profile_mode"],
+    }
+
+
+def _trend_label(delta: float, good_when_negative: bool = True) -> str:
+    eps = 0.0001
+    if abs(delta) <= eps:
+        return "stable"
+    if good_when_negative:
+        return "improving" if delta < 0 else "worsening"
+    return "improving" if delta > 0 else "worsening"
+
+
+def _phase_transition_label(from_phase: str, to_phase: str) -> str:
+    order = {
+        "seed": 0,
+        "learning_stable": 1,
+        "advanced": 2,
+    }
+    if from_phase == to_phase:
+        return "stable"
+    from_rank = order.get(from_phase, 0)
+    to_rank = order.get(to_phase, 0)
+    if to_rank > from_rank:
+        return "maturing"
+    if to_rank < from_rank:
+        return "regressing"
+    return "stable"
+
+
+def _profile_transition_label(from_profile: str, to_profile: str) -> str:
+    if from_profile == to_profile:
+        return "stable"
+    return f"{from_profile}_to_{to_profile}"
+
+
+def _compute_ai_confidence_score(
+    *,
+    total_samples: int,
+    risk_ratio: float,
+    fail_safe_ratio: float,
+    risk_alerts: int,
+    total_runs: int,
+) -> Dict[str, Any]:
+    cfg = _get_ai_conf_config(total_samples)
+
+    weight_total = float(cfg["weight_maturity"]) + float(cfg["weight_stability"]) + float(cfg["weight_alerts"])
+    if weight_total <= 0:
+        normalized_maturity = 0.45
+        normalized_stability = 0.45
+        normalized_alerts = 0.10
+    else:
+        normalized_maturity = float(cfg["weight_maturity"]) / weight_total
+        normalized_stability = float(cfg["weight_stability"]) / weight_total
+        normalized_alerts = float(cfg["weight_alerts"]) / weight_total
+
+    sample_maturity = min(max(total_samples, 0) / float(cfg["samples_target"]), 1.0)
+    stability_penalty = min(max((risk_ratio * float(cfg["risk_weight"])) + (fail_safe_ratio * float(cfg["failsafe_weight"])), 0.0), 1.0)
+    stability = 1.0 - stability_penalty
+    alerts_per_run = (risk_alerts / max(total_runs, 1)) if total_runs >= 0 else 0.0
+    alert_pressure = min(max(alerts_per_run, 0.0), 1.0)
+
+    score_raw = (
+        (sample_maturity * normalized_maturity * 100.0)
+        + (stability * normalized_stability * 100.0)
+        + ((1.0 - alert_pressure) * normalized_alerts * 100.0)
+    )
+    score = max(0.0, min(100.0, score_raw))
+
+    cut_excellent = max(1, min(100, int(cfg["band_excellent"])))
+    cut_good = max(1, min(cut_excellent, int(cfg["band_good"])))
+    cut_moderate = max(1, min(cut_good, int(cfg["band_moderate"])))
+
+    band = "low"
+    if score >= cut_excellent:
+        band = "excellent"
+    elif score >= cut_good:
+        band = "good"
+    elif score >= cut_moderate:
+        band = "moderate"
+
+    return {
+        "score": round(score, 2),
+        "band": band,
+        "profile": str(cfg["profile_effective"]),
+        "profile_mode": str(cfg["profile_setting"]),
+        "components": {
+            "sample_maturity": round(sample_maturity, 4),
+            "stability": round(stability, 4),
+            "alert_pressure": round(alert_pressure, 4),
+        },
+    }
+
+
+def _parse_trend_windows_param(windows: str) -> List[int]:
+    """Parse query string like '7,30,90' into sanitized unique sorted windows."""
+    default_windows = [7, 30]
+    if not windows.strip():
+        return default_windows
+
+    parsed: List[int] = []
+    for raw in windows.split(","):
+        token = raw.strip()
+        if not token:
+            continue
+        try:
+            value = int(token)
+        except ValueError:
+            continue
+        if 1 <= value <= 365 and value not in parsed:
+            parsed.append(value)
+
+    if not parsed:
+        return default_windows
+
+    parsed.sort()
+    return parsed[:6]
+
+
+@app.get("/ai/health")
+def ai_health_report() -> Dict[str, Any]:
+    db = get_db()
+    live_context = db.build_multi_agent_live_context(operation_id=None)
+    learning_snapshot = cast(Dict[str, Any], live_context.get("learning_snapshot") or {})
+    recent_runs = db.get_recent_multi_agent_runs(limit=50)
+
+    total_samples = int(learning_snapshot.get("total_samples", 0) or 0)
+    ops_stats = cast(Dict[str, Any], learning_snapshot.get("operations") or {})
+    operator_profiles = cast(Dict[str, Any], learning_snapshot.get("operator_profiles") or {})
+
+    runs_24h = 0
+    runs_with_risk = 0
+    runs_with_fail_safe = 0
+    now_utc = datetime.now(timezone.utc)
+
+    for run in recent_runs:
+        created_raw = str(run.get("criado_em") or "")
+        response_payload = cast(Dict[str, Any], run.get("response_payload") or {})
+        risks = cast(List[Any], response_payload.get("risks") or [])
+        transcript = cast(List[Any], response_payload.get("transcript") or [])
+
+        if risks:
+            runs_with_risk += 1
+
+        has_fail_safe = False
+        for item in transcript:
+            if isinstance(item, dict):
+                item_dict = cast(Dict[str, Any], item)
+                if str(item_dict.get("role", "")).lower() == "fail-safe":
+                    has_fail_safe = True
+                    break
+        if has_fail_safe:
+            runs_with_fail_safe += 1
+
+        if created_raw:
+            try:
+                created_dt = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
+                if created_dt.tzinfo is None:
+                    created_dt = created_dt.replace(tzinfo=timezone.utc)
+                age_hours = (now_utc - created_dt.astimezone(timezone.utc)).total_seconds() / 3600
+                if age_hours <= 24:
+                    runs_24h += 1
+            except Exception:
+                pass
+
+    model_maturity = "seed"
+    if total_samples >= 300:
+        model_maturity = "advanced"
+    elif total_samples >= 100:
+        model_maturity = "stable"
+    elif total_samples >= 30:
+        model_maturity = "learning"
+
+    risk_ratio = 0.0
+    fail_safe_ratio = 0.0
+    if recent_runs:
+        risk_ratio = round(runs_with_risk / len(recent_runs), 4)
+        fail_safe_ratio = round(runs_with_fail_safe / len(recent_runs), 4)
+
+    risk_alerts_today = len(cast(List[Any], live_context.get("risk_alerts") or []))
+    daily_operations = int(cast(Dict[str, Any], live_context.get("daily_summary") or {}).get("total_operacoes", 0) or 0)
+    confidence = _compute_ai_confidence_score(
+        total_samples=total_samples,
+        risk_ratio=risk_ratio,
+        fail_safe_ratio=fail_safe_ratio,
+        risk_alerts=risk_alerts_today,
+        total_runs=max(len(recent_runs), daily_operations),
+    )
+
+    readiness = "ok"
+    readiness_reasons: List[str] = []
+    if total_samples < 30:
+        readiness = "attention"
+        readiness_reasons.append("base_historica_baixa")
+    if fail_safe_ratio > 0.05:
+        readiness = "attention"
+        readiness_reasons.append("falha_interna_agentes")
+    if risk_ratio > 0.5:
+        readiness = "attention"
+        readiness_reasons.append("alta_taxa_alertas_risco")
+
+    if not readiness_reasons:
+        readiness_reasons.append("operacao_dentro_do_esperado")
+
+    return {
+        "status": readiness,
+        "confidence": confidence,
+        "readiness_reasons": readiness_reasons,
+        "learning": {
+            "maturity": model_maturity,
+            "lookback_days": int(learning_snapshot.get("lookback_days", 0) or 0),
+            "total_samples": total_samples,
+            "operation_profiles": len(ops_stats),
+            "operator_profiles": len(operator_profiles),
+            "currency_mix": cast(Dict[str, Any], learning_snapshot.get("currency_mix") or {}),
+        },
+        "multi_agent": {
+            "recent_runs": len(recent_runs),
+            "runs_24h": runs_24h,
+            "risk_ratio": risk_ratio,
+            "fail_safe_ratio": fail_safe_ratio,
+            "risk_alerts_today": risk_alerts_today,
+        },
+        "observability": {
+            "top_divergences_today": len(cast(List[Any], live_context.get("top_divergences") or [])),
+            "daily_operations": daily_operations,
+        },
+    }
+
+
+@app.get("/ai/health/trends")
+def ai_health_trends(windows: str = "7,30") -> Dict[str, Any]:
+    db = get_db()
+
+    selected_windows = _parse_trend_windows_param(windows)
+    metrics_by_window: Dict[int, Dict[str, Any]] = {}
+    for days in selected_windows:
+        metrics_by_window[days] = _compute_ai_window_metrics(db, days=days)
+
+    short_window = selected_windows[0]
+    long_window = selected_windows[-1]
+    short_metrics = metrics_by_window[short_window]
+    long_metrics = metrics_by_window[long_window]
+
+    risk_ratio_delta = round(short_metrics["risk_ratio"] - long_metrics["risk_ratio"], 4)
+    fail_safe_delta = round(short_metrics["fail_safe_ratio"] - long_metrics["fail_safe_ratio"], 4)
+    avg_risk_delta = round(short_metrics["avg_risks_per_run"] - long_metrics["avg_risks_per_run"], 4)
+    alerts_delta = int(short_metrics["risk_alerts"]) - int(long_metrics["risk_alerts"])
+    learning_delta = int(short_metrics["learning_samples"]) - int(long_metrics["learning_samples"])
+    confidence_delta = round(float(short_metrics["confidence_score"]) - float(long_metrics["confidence_score"]), 4)
+
+    trend_summary: Dict[str, Dict[str, Any]] = {
+        "risk_ratio": {
+            "delta": risk_ratio_delta,
+            "trend": _trend_label(risk_ratio_delta, good_when_negative=True),
+        },
+        "fail_safe_ratio": {
+            "delta": fail_safe_delta,
+            "trend": _trend_label(fail_safe_delta, good_when_negative=True),
+        },
+        "avg_risks_per_run": {
+            "delta": avg_risk_delta,
+            "trend": _trend_label(avg_risk_delta, good_when_negative=True),
+        },
+        "risk_alerts": {
+            "delta": alerts_delta,
+            "trend": _trend_label(float(alerts_delta), good_when_negative=True),
+        },
+        "learning_samples": {
+            "delta": learning_delta,
+            "trend": _trend_label(float(learning_delta), good_when_negative=False),
+        },
+        "confidence_score": {
+            "delta": confidence_delta,
+            "trend": _trend_label(confidence_delta, good_when_negative=False),
+        },
+        "learning_phase": {
+            "from": long_metrics["learning_phase"],
+            "to": short_metrics["learning_phase"],
+            "trend": _phase_transition_label(
+                str(long_metrics["learning_phase"]),
+                str(short_metrics["learning_phase"]),
+            ),
+            "transition": f"{long_metrics['learning_phase']} -> {short_metrics['learning_phase']}",
+        },
+        "confidence_profile": {
+            "from": long_metrics["confidence_profile"],
+            "to": short_metrics["confidence_profile"],
+            "trend": _profile_transition_label(
+                str(long_metrics["confidence_profile"]),
+                str(short_metrics["confidence_profile"]),
+            ),
+            "transition": f"{long_metrics['confidence_profile']} -> {short_metrics['confidence_profile']}",
+        },
+    }
+
+    windows_payload: Dict[str, Any] = {}
+    for days in selected_windows:
+        windows_payload[f"last_{days}_days"] = metrics_by_window[days]
+
+    return {
+        "selected_windows": selected_windows,
+        "comparison": {
+            "short_window_days": short_window,
+            "long_window_days": long_window,
+            "short_learning_phase": short_metrics["learning_phase"],
+            "long_learning_phase": long_metrics["learning_phase"],
+            "short_confidence_profile": short_metrics["confidence_profile"],
+            "long_confidence_profile": long_metrics["confidence_profile"],
+        },
+        "windows": windows_payload,
+        "trend_summary": trend_summary,
+    }
+
+
 def _processar_webhook(
     payload: WhatsAppWebhookPayload,
     db: DatabaseClient,
@@ -2927,7 +3441,7 @@ def _processar_webhook(
             valor_informado=None,
             resposta=(
                 "Não foi possível interpretar a mensagem. "
-                "Tente: 'Comprei 2g de ouro a 105' ou 'Taxa USD 5.40'."
+                "Tente: 'compra', 'venda', 'caixa', 'extrato' ou 'taxa ouro 70.00'."
             ),
         )
     except ValidationError as exc:
@@ -2946,7 +3460,7 @@ def _processar_webhook(
             valor_informado=None,
             resposta=(
                 "Dados insuficientes. "
-                "Informe o ativo e a quantidade, por exemplo: 'Vendi 3g de ouro'."
+                "Informe o ativo e a quantidade, por exemplo: 'venda ouro 3g'."
             ),
         )
 

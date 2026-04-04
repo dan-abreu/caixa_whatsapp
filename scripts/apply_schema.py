@@ -20,7 +20,8 @@ def build_db_url() -> str:
 
 
 def main() -> None:
-    schema_path = Path(__file__).with_name("schema.sql")
+    repo_root = Path(__file__).resolve().parents[1]
+    schema_path = repo_root / "sql" / "schema.sql"
     sql = schema_path.read_text(encoding="utf-8")
     db_url = build_db_url()
 

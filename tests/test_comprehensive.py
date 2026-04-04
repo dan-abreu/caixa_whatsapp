@@ -5,6 +5,8 @@ Teste Completo do Sistema Caixa Inteligente
 
 import os
 import json
+import sys
+from pathlib import Path
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Dict, List
@@ -15,6 +17,9 @@ os.environ.setdefault("LOG_LEVEL", "INFO")
 os.environ.setdefault("SUPABASE_URL", "https://test.supabase.co")
 os.environ.setdefault("SUPABASE_SERVICE_ROLE_KEY", "test_key")
 os.environ.setdefault("TZ_OFFSET_HOURS", "-3")
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT))
 
 from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
@@ -33,7 +38,7 @@ print("\n[TESTE 1] Endpoints Básicos")
 print("-" * 80)
 
 # Mock database to avoid Supabase dependency
-with patch("main.DatabaseClient") as MockDB:
+with patch("app.main.DatabaseClient") as MockDB:
     mock_db = MagicMock()
     mock_db.get_usuario_by_telefone.return_value = {
         "id": 1,
@@ -54,7 +59,7 @@ with patch("main.DatabaseClient") as MockDB:
     mock_db.get_taxa_atual.return_value = {"preco_compra": "65.50"}
     MockDB.return_value = mock_db
 
-    from main import app
+    from app.main import app
 
     client = TestClient(app)
 
@@ -123,7 +128,7 @@ test_cases = [
     },
 ]
 
-with patch("main.DatabaseClient") as MockDB, \
+with patch("app.main.DatabaseClient") as MockDB, \
      patch("ai_service.extract_message_data") as mock_ai:
 
     # Setup mock DB
@@ -189,7 +194,7 @@ with patch("main.DatabaseClient") as MockDB, \
 
     mock_ai.side_effect = mock_ai_response
 
-    from main import app as app_test
+    from app.main import app as app_test
 
     client = TestClient(app_test)
 
@@ -250,13 +255,13 @@ error_test_cases = [
     },
 ]
 
-with patch("main.DatabaseClient") as MockDB:
+with patch("app.main.DatabaseClient") as MockDB:
     mock_db = MagicMock()
     mock_db.get_processed_message.return_value = None
     mock_db.save_processed_message.return_value = None
     MockDB.return_value = mock_db
 
-    from main import app as app_test2
+    from app.main import app as app_test2
 
     client = TestClient(app_test2)
 
@@ -280,7 +285,7 @@ print("\n\n[TESTE 4] Guardrails de IA (Sanitizacao)")
 print("-" * 80)
 
 try:
-    from ai_service import _sanitize_extracted_payload
+    from app.ai_service import _sanitize_extracted_payload
     
     sanitization_tests = [
         {
@@ -376,7 +381,7 @@ except Exception as e:
 print("\n\n[TESTE 5] Moedas Suportadas")
 print("-" * 80)
 
-from ai_service import _normalize_ativo_value
+from app.ai_service import _normalize_ativo_value
 
 moeda_tests = [
     ("ouro", "ouro"),

@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Quick test of the new 5-caixa system"""
-import os
 import sys
+from pathlib import Path
 from decimal import Decimal
-from datetime import datetime, timezone
 
-# Add current dir to path
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Add repo root to path
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT))
 
-from database import DatabaseClient
+from app.database import DatabaseClient
 
 def test_caixas():
     """Test the new 5-caixa system."""

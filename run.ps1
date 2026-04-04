@@ -48,7 +48,7 @@ if (-not $Port) {
     $Port = if ($env:APP_PORT) { [int]$env:APP_PORT } else { 8000 }
 }
 
-$uvicornArgs = @("-m", "uvicorn", "main:app", "--host", $HostAddress, "--port", "$Port")
+$uvicornArgs = @("-m", "uvicorn", "app.main:app", "--host", $HostAddress, "--port", "$Port")
 if (-not $NoReload) {
     $uvicornArgs += "--reload"
 }

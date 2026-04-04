@@ -1,3 +1,5 @@
+<!-- markdownlint-disable -->
+
 # 📋 RELATÓRIO COMPLETO DE TESTES
 ## Sistema: Caixa Inteligente WhatsApp - Versão 1.0.0
 
@@ -303,3 +305,5 @@ Todos os 5 menu options foram testados e funcionam conforme especificado. Os gua
 **Relatório Gerado Automaticamente**  
 Sistema: Caixa Inteligente v1.0.0  
 Status: ✅ APROVADO PARA PRODUÇÃO
+
+<!-- markdownlint-enable -->

@@ -20,7 +20,7 @@ if (-not (Test-Path $pythonExe)) {
 }
 
 # Garante estado limpo de sessão para não herdar fluxo guiado pendente entre execuções.
-& $pythonExe -c "from database import DatabaseClient; db=DatabaseClient(); [db.clear_conversation_session(p) for p in ['+559891438754','+59711111111','+59700000000']]"
+& $pythonExe -c "from app.database import DatabaseClient; db=DatabaseClient(); [db.clear_conversation_session(p) for p in ['+559891438754','+59711111111','+59700000000']]"
 
 function Run-Test {
   param([string]$Name, [scriptblock]$Action, [scriptblock]$Assert)

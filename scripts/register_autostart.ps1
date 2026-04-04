@@ -1,7 +1,7 @@
 $ErrorActionPreference = "Stop"
 
-$repo = Split-Path -Parent $MyInvocation.MyCommand.Path
-$startScript = Join-Path $repo "start_background.ps1"
+$repo = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+$startScript = Join-Path $repo "scripts\start_background.ps1"
 
 $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$startScript`""
 $trigger = New-ScheduledTaskTrigger -AtLogOn
