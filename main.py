@@ -242,6 +242,7 @@ _MULTI_AGENT_AUTO_MIN_USD = Decimal(os.getenv("MULTI_AGENT_AUTO_MIN_USD", "500")
 _MULTI_AGENT_AUTO_MIN_WEIGHT_GRAMS = Decimal(os.getenv("MULTI_AGENT_AUTO_MIN_WEIGHT_GRAMS", "10"))
 _GUIDED_FLOW_STATES = {
     "await_menu_option",
+    "await_menu_tipo_operacao",
     "await_origem",
     "await_teor",
     "await_peso",
@@ -400,11 +401,16 @@ def _handle_menu_option(remetente: str, mensagem: str, db: DatabaseClient) -> Op
         }
 
     if option == "1":
-        _clear_session(db, remetente)
+        _save_session(
+            db,
+            remetente,
+            "await_menu_tipo_operacao",
+            {"source": "menu", "source_message_id": None},
+        )
         return {
             "mensagem": (
                 "Perfeito. Vamos registrar uma operacao.\n"
-                "Envie no formato: 'Comprei 2g de ouro a 105'."
+                "Informe o tipo: compra ou venda."
             ),
             "dados": {"acao": "registrar_operacao"},
         }
@@ -415,9 +421,22 @@ def _handle_menu_option(remetente: str, mensagem: str, db: DatabaseClient) -> Op
 
     if option == "3":
         _clear_session(db, remetente)
+        usuario = db.get_usuario_by_telefone(remetente)
+        if not usuario or usuario.get("tipo_usuario") != "admin":
+            return {
+                "mensagem": (
+                    "Voce nao tem permissao para atualizar taxas. "
+                    "Essa opcao e exclusiva para administradores."
+                ),
+                "dados": {"acao": "atualizar_taxa", "permitido": False},
+            }
         return {
-            "mensagem": "Atualizacao de taxa (admin): envie no formato 'Taxa USD 5.40'.",
-            "dados": {"acao": "atualizar_taxa"},
+            "mensagem": (
+                "Atualizacao de taxa liberada.\n"
+                "Envie no formato: Taxa USD 5.40\n"
+                "Ou: Taxa Ouro 105.00"
+            ),
+            "dados": {"acao": "atualizar_taxa", "permitido": True},
         }
 
     if option == "4":
@@ -641,6 +660,28 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
         menu_result = _handle_menu_option(remetente, mensagem, db)
         if menu_result is not None:
             return menu_result
+
+    if estado == "await_menu_tipo_operacao":
+        if text not in {"compra", "venda"}:
+            return {
+                "mensagem": "Tipo invalido. Responda com: compra ou venda.",
+                "dados": {"etapa": "await_menu_tipo_operacao"},
+            }
+
+        contexto.update(
+            {
+                "tipo_operacao": text,
+                "pagamentos": [],
+                "moedas": [],
+                "moeda_index": 0,
+                "moeda_atual": None,
+            }
+        )
+        _save_session(db, remetente, "await_origem", contexto)
+        return {
+            "mensagem": f"Iniciando {text}. A operacao foi balcao ou fora?",
+            "dados": {"intencao": "fluxo_guiado", "etapa": "await_origem"},
+        }
 
     if estado == "await_origem":
         if text not in {"balcao", "balcão", "fora"}:
