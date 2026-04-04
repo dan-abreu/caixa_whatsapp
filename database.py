@@ -593,86 +593,71 @@ class DatabaseClient:
                     except Exception:
                         pass
 
+            # UPDATE THE 5 CAIXAS
             op_kind = str(payload.get("tipo_operacao", "compra"))
-            total_usd = Decimal(str(payload.get("total_usd", 0)))
-            total_paid_usd = Decimal(str(payload.get("total_pago_usd", total_usd)))
+            peso = Decimal(str(payload.get("peso", 0)))
+            pessoa = str(payload.get("pessoa", "N/A"))
+            
+            self.update_caixas_from_transaction(
+                gold_transaction_id=int(transaction_id),
+                tipo_operacao=op_kind,
+                peso_gramas=peso,
+                pagamentos=pagamentos,
+                pessoa=pessoa,
+            )
+
+            # SIMPLIFIED JOURNAL ENTRY (no USD conversion)
+            op_kind = str(payload.get("tipo_operacao", "compra"))
             peso = Decimal(str(payload.get("peso", 0)))
             pessoa = str(payload.get("pessoa", "N/A"))
             operador = str(payload.get("operador_id", "N/A"))
 
             journal_lines: List[Dict[str, Any]] = []
-            if op_kind == "compra":
-                journal_lines = [
-                    {
-                        "account_code": "INVENTORY_COMMODITIES",
-                        "currency_code": "USD",
-                        "debit": total_usd,
-                        "credit": Decimal("0"),
-                        "commodity_symbol": "XAU",
-                        "quantity": peso,
-                    },
-                    {
-                        "account_code": "CASH_USD_EQUIV",
-                        "currency_code": "USD",
-                        "debit": Decimal("0"),
-                        "credit": total_paid_usd,
-                    },
-                ]
 
-                diff = total_paid_usd - total_usd
-                if diff > 0:
+            # Record each moeda in its own currency
+            for pagamento in pagamentos:
+                moeda = str(pagamento.get("moeda", "USD")).upper()
+                valor_moeda = Decimal(str(pagamento.get("valor_moeda", 0)))
+
+                if valor_moeda <= 0:
+                    continue
+
+                if op_kind == "compra":
                     journal_lines.append(
                         {
-                            "account_code": "FX_GAIN_LOSS",
-                            "currency_code": "USD",
-                            "debit": diff,
+                            "account_code": "INVENTORY_COMMODITIES",
+                            "currency_code": moeda,
+                            "debit": valor_moeda,
+                            "credit": Decimal("0"),
+                            "commodity_symbol": "XAU",
+                            "quantity": peso if moeda == list(pagamentos)[0].get("moeda", "USD").upper() else None,
+                        }
+                    )
+                    journal_lines.append(
+                        {
+                            "account_code": "CASH_" + moeda,
+                            "currency_code": moeda,
+                            "debit": Decimal("0"),
+                            "credit": valor_moeda,
+                        }
+                    )
+                else:  # venda
+                    journal_lines.append(
+                        {
+                            "account_code": "CASH_" + moeda,
+                            "currency_code": moeda,
+                            "debit": valor_moeda,
                             "credit": Decimal("0"),
                         }
                     )
-                elif diff < 0:
                     journal_lines.append(
                         {
-                            "account_code": "PAYABLE_CLIENT_SETTLEMENT",
-                            "currency_code": "USD",
+                            "account_code": "INVENTORY_COMMODITIES",
+                            "currency_code": moeda,
                             "debit": Decimal("0"),
-                            "credit": (diff * Decimal("-1")),
-                        }
-                    )
-            else:
-                journal_lines = [
-                    {
-                        "account_code": "CASH_USD_EQUIV",
-                        "currency_code": "USD",
-                        "debit": total_paid_usd,
-                        "credit": Decimal("0"),
-                    },
-                    {
-                        "account_code": "INVENTORY_COMMODITIES",
-                        "currency_code": "USD",
-                        "debit": Decimal("0"),
-                        "credit": total_usd,
-                        "commodity_symbol": "XAU",
-                        "quantity": peso,
-                    },
-                ]
-
-                diff = total_paid_usd - total_usd
-                if diff > 0:
-                    journal_lines.append(
-                        {
-                            "account_code": "FX_GAIN_LOSS",
-                            "currency_code": "USD",
-                            "debit": Decimal("0"),
-                            "credit": diff,
-                        }
-                    )
-                elif diff < 0:
-                    journal_lines.append(
-                        {
-                            "account_code": "RECEIVABLE_CLIENT_SETTLEMENT",
-                            "currency_code": "USD",
-                            "debit": (diff * Decimal("-1")),
-                            "credit": Decimal("0"),
+                            "credit": valor_moeda,
+                            "commodity_symbol": "XAU",
+                            "quantity": peso if moeda == list(pagamentos)[0].get("moeda", "USD").upper() else None,
                         }
                     )
 
@@ -687,9 +672,6 @@ class DatabaseClient:
                     "tipo_operacao": op_kind,
                     "peso": str(peso),
                     "teor": str(payload.get("teor")),
-                    "total_usd": str(total_usd),
-                    "total_paid_usd": str(total_paid_usd),
-                    "settlement_gap_usd": str(total_paid_usd - total_usd),
                     "pagamentos": pagamentos,
                 },
                 lines=journal_lines,
@@ -1138,123 +1120,158 @@ class DatabaseClient:
         except Exception:
             return []
 
-    def get_saldo_caixa(self) -> Dict[str, Any]:
-        """Cumulative balance: gold grams in stock + per-currency cash totals.
+    def _ensure_caixas_exist(self) -> None:
+        """Ensure all 5 caixas exist in the database."""
+        moedas = ["XAU", "EUR", "USD", "SRD", "BRL"]
+        for moeda in moedas:
+            try:
+                self.client.table("caixas").insert({"moeda": moeda, "saldo": "0"}).execute()
+            except Exception:
+                # Already exists, which is fine
+                pass
 
-        Direction rules (caixa = cash drawer perspective):
-          compra de ouro  -> gold IN  (+g),  cash OUT (-moeda)
-          venda de ouro   -> gold OUT (-g),  cash IN  (+moeda)
+    def _record_caixa_movimentacao(
+        self,
+        caixa_moeda: str,
+        tipo_operacao: str,
+        gold_transaction_id: Optional[int],
+        valor: Decimal,
+        saldo_anterior: Decimal,
+        saldo_posterior: Decimal,
+        descricao: Optional[str] = None,
+        pessoa: Optional[str] = None,
+    ) -> None:
+        """Record a caixa movement in audit trail."""
+        try:
+            payload: Dict[str, Any] = {
+                "caixa_moeda": caixa_moeda.upper(),
+                "tipo_operacao": tipo_operacao,
+                "gold_transaction_id": gold_transaction_id,
+                "valor": str(valor),
+                "saldo_anterior": str(saldo_anterior),
+                "saldo_posterior": str(saldo_posterior),
+                "descricao": descricao,
+                "pessoa": pessoa,
+                "criado_em": datetime.now(timezone.utc).isoformat(),
+            }
+            self.client.table("caixas_movimentacoes").insert(payload).execute()
+        except Exception:
+            return
 
-        Exchange-rate convention stored in cambio_para_usd:
-          "1 USD = X moeda"  (SRD=38, BRL=5.20, EUR=0.877, USD=1.0)
+    def update_caixas_from_transaction(
+        self,
+        gold_transaction_id: int,
+        tipo_operacao: str,
+        peso_gramas: Decimal,
+        pagamentos: List[Dict[str, Any]],
+        pessoa: Optional[str] = None,
+    ) -> None:
+        """Update all 5 caixas based on a transaction.
+        
+        Direction rules (caixa drawer perspective):
+          - COMPRA: ouro ENTRA (+gramas), dinheiro SAI (-moeda)
+          - VENDA: ouro SAI (-gramas), dinheiro ENTRA (+moeda)
         """
         try:
-            ouro = self.get_ativo_by_nome("Ouro")
-            if not ouro:
-                ouro = self.get_ativo_by_nome("Ouro 24k")
-            ouro_id = int(ouro["id"]) if ouro else None
+            self._ensure_caixas_exist()
 
-            t_resp = (
-                self.client.table("transacoes")
-                .select("tipo_operacao,ativo_id,quantidade,moeda_liquidacao,valor_moeda,valor_total")
-                .execute()
-            )
-            t_rows = cast(List[Dict[str, Any]], t_resp.data or [])
+            # Update XAU (ouro) caixa
+            if peso_gramas > 0:
+                direcao_xau = Decimal("1") if tipo_operacao == "compra" else Decimal("-1")
+                movimento_xau = peso_gramas * direcao_xau
 
-            gold_gramas: Decimal = Decimal("0")
-            currency_map: Dict[str, Decimal] = {}
+                resp = self.client.table("caixas").select("saldo").eq("moeda", "XAU").execute()
+                rows = cast(List[Dict[str, Any]], resp.data or [])
+                saldo_anterior_xau = Decimal(str(rows[0].get("saldo", 0))) if rows else Decimal("0")
+                saldo_posterior_xau = saldo_anterior_xau + movimento_xau
 
-            for row in t_rows:
-                tipo = str(row.get("tipo_operacao", ""))
-                qty = Decimal(str(row.get("quantidade", "0")))
-                aid = int(row.get("ativo_id", 0))
+                self.client.table("caixas").update({"saldo": str(saldo_posterior_xau), "atualizado_em": datetime.now(timezone.utc).isoformat()}).eq("moeda", "XAU").execute()
 
-                if aid == ouro_id:
-                    if tipo == "compra":
-                        gold_gramas += qty
-                    elif tipo in ("venda", "cambio"):
-                        gold_gramas -= qty
+                self._record_caixa_movimentacao(
+                    caixa_moeda="XAU",
+                    tipo_operacao=tipo_operacao,
+                    gold_transaction_id=gold_transaction_id,
+                    valor=movimento_xau,
+                    saldo_anterior=saldo_anterior_xau,
+                    saldo_posterior=saldo_posterior_xau,
+                    descricao=f"{tipo_operacao} ouro",
+                    pessoa=pessoa,
+                )
 
-                moeda = str(row.get("moeda_liquidacao") or "USD").upper()
-                valor_m_raw = row.get("valor_moeda")
-                if valor_m_raw is not None:
-                    valor_m = Decimal(str(valor_m_raw))
-                else:
-                    moeda = "USD"
-                    valor_m = Decimal(str(row.get("valor_total", "0")))
+            # Update moeda caixas (EUR, USD, SRD, BRL)
+            for pagamento in pagamentos:
+                moeda = str(pagamento.get("moeda", "USD")).upper()
+                valor_moeda = Decimal(str(pagamento.get("valor_moeda", "0")))
 
-                currency_map.setdefault(moeda, Decimal("0"))
-                if tipo == "venda":
-                    currency_map[moeda] += valor_m
-                elif tipo == "compra":
-                    currency_map[moeda] -= valor_m
-
-            gt_resp = (
-                self.client.table("gold_transactions")
-                .select("id,tipo_operacao,peso,contexto")
-                .execute()
-            )
-            gt_rows = cast(List[Dict[str, Any]], gt_resp.data or [])
-            gt_tipo_map: Dict[int, str] = {}
-            gt_context_pagamentos: Dict[int, List[Dict[str, Any]]] = {}
-            for row in gt_rows:
-                gid = int(row.get("id", 0))
-                tipo = str(row.get("tipo_operacao", ""))
-                gt_tipo_map[gid] = tipo
-
-                contexto_raw = row.get("contexto")
-                if isinstance(contexto_raw, dict):
-                    pagamentos_ctx = contexto_raw.get("pagamentos")
-                    if isinstance(pagamentos_ctx, list):
-                        gt_context_pagamentos[gid] = [p for p in pagamentos_ctx if isinstance(p, dict)]
-
-                peso = Decimal(str(row.get("peso", "0")))
-                if tipo == "compra":
-                    gold_gramas += peso
-                elif tipo in ("venda", "cambio"):
-                    gold_gramas -= peso
-
-            gp_resp = (
-                self.client.table("gold_payments")
-                .select("gold_transaction_id,moeda,valor_moeda")
-                .execute()
-            )
-            gp_rows = cast(List[Dict[str, Any]], gp_resp.data or [])
-            gp_tx_ids: set[int] = set()
-            for row in gp_rows:
-                moeda = str(row.get("moeda", "USD")).upper()
-                val = Decimal(str(row.get("valor_moeda", "0")))
-                gid = int(row.get("gold_transaction_id", 0))
-                tipo = gt_tipo_map.get(gid, "compra")
-                gp_tx_ids.add(gid)
-
-                currency_map.setdefault(moeda, Decimal("0"))
-                if tipo == "venda":
-                    currency_map[moeda] += val
-                elif tipo == "compra":
-                    currency_map[moeda] -= val
-
-            # Fallback: if payments table misses rows for a guided transaction,
-            # derive per-currency movement from the transaction contexto.pagamentos.
-            for gid, pagamentos in gt_context_pagamentos.items():
-                if gid in gp_tx_ids:
+                if valor_moeda == 0:
                     continue
-                tipo = gt_tipo_map.get(gid, "compra")
-                for pagamento in pagamentos:
-                    moeda = str(pagamento.get("moeda", "USD")).upper()
-                    val = Decimal(str(pagamento.get("valor_moeda", "0")))
-                    currency_map.setdefault(moeda, Decimal("0"))
-                    if tipo == "venda":
-                        currency_map[moeda] += val
-                    elif tipo == "compra":
-                        currency_map[moeda] -= val
 
-            return {
-                "gold_gramas": str(gold_gramas),
-                "moedas": {k: str(v) for k, v in sorted(currency_map.items())},
-            }
+                # Para COMPRA: dinheiro SAI (-), para VENDA: dinheiro ENTRA (+)
+                direcao_moeda = Decimal("-1") if tipo_operacao == "compra" else Decimal("1")
+                movimento_moeda = valor_moeda * direcao_moeda
+
+                resp = self.client.table("caixas").select("saldo").eq("moeda", moeda).execute()
+                rows = cast(List[Dict[str, Any]], resp.data or [])
+                saldo_anterior_moeda = Decimal(str(rows[0].get("saldo", 0))) if rows else Decimal("0")
+                saldo_posterior_moeda = saldo_anterior_moeda + movimento_moeda
+
+                self.client.table("caixas").update({"saldo": str(saldo_posterior_moeda), "atualizado_em": datetime.now(timezone.utc).isoformat()}).eq("moeda", moeda).execute()
+
+                self._record_caixa_movimentacao(
+                    caixa_moeda=moeda,
+                    tipo_operacao=tipo_operacao,
+                    gold_transaction_id=gold_transaction_id,
+                    valor=movimento_moeda,
+                    saldo_anterior=saldo_anterior_moeda,
+                    saldo_posterior=saldo_posterior_moeda,
+                    descricao=f"{tipo_operacao} ouro ({moeda})",
+                    pessoa=pessoa,
+                )
+
         except Exception:
-            return {"gold_gramas": "0", "moedas": {}}
+            pass
+
+    def get_saldo_caixa(self) -> Dict[str, Any]:
+        """Get current balance for all 5 caixas.
+        
+        Returns:
+          {
+            "XAU": "1614.0",        # gramas
+            "EUR": "-1861.40",      # euros
+            "USD": "-123237.00",    # dólares
+            "SRD": "-12236.00",     # surinamês
+            "BRL": "-2080.00"       # reais
+          }
+        
+        Each cache is independent - no conversion, no USD reference.
+        """
+        try:
+            self._ensure_caixas_exist()
+            
+            resp = self.client.table("caixas").select("moeda,saldo").execute()
+            rows = cast(List[Dict[str, Any]], resp.data or [])
+            
+            result: Dict[str, Any] = {}
+            for row in rows:
+                moeda = str(row.get("moeda", "")).upper()
+                saldo = Decimal(str(row.get("saldo", "0")))
+                result[moeda] = str(saldo)
+            
+            # Ensure all 5 caixas are present
+            for moeda in ["XAU", "EUR", "USD", "SRD", "BRL"]:
+                if moeda not in result:
+                    result[moeda] = "0"
+            
+            return result
+        except Exception:
+            # Fallback silently
+            return {
+                "XAU": "0",
+                "EUR": "0", 
+                "USD": "0",
+                "SRD": "0",
+                "BRL": "0"
+            }
 
     def get_top_divergences(self, start_iso: str, end_iso: str, limit: int = 10) -> List[Dict[str, Any]]:
         # Soft-fail if enterprise tables are not migrated yet.

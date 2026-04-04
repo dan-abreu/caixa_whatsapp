@@ -883,109 +883,128 @@ def _build_whatsapp_checklist_menu() -> str:
 
 
 def _build_caixa_response(db: DatabaseClient, requested_currency: Optional[str] = None) -> Dict[str, Any]:
+    """Build safe-to-display caixa status with 5 independent cashes (5 caixas).
+    
+    NEW STRUCTURE (as of refactor):
+    - Caixa XAU: gramas de ouro (quantidade)
+    - Caixa EUR: saldo em euros (sem conversão)
+    - Caixa USD: saldo em dólares (sem conversão)
+    - Caixa SRD: saldo em surinamês (sem conversão)
+    - Caixa BRL: saldo em reais (sem conversão)
+    
+    Each caixa is independent. No USD reference layer.
+    """
     day = _build_day_range(None)
     summary = db.get_daily_gold_summary(day["start"], day["end"])
     saldo = db.get_saldo_caixa()
-
-    gold_gramas = saldo.get("gold_gramas", "0")
-    moedas = saldo.get("moedas", {})
+    
     ops_hoje = int(summary.get("total_operacoes", 0) or 0)
-
-    moeda_simbolo = {"USD": "$", "EUR": "EUR ", "SRD": "SRD ", "BRL": "R$"}
-    moeda_ordem = ["USD", "EUR", "SRD", "BRL"]
-
-    linhas_moeda: List[str] = []
-    for m in moeda_ordem:
-        val_str = moedas.get(m, "0")
-        val = Decimal(str(val_str))
-        simbolo = moeda_simbolo.get(m, m)
-        situacao = "positivo" if val >= 0 else "negativo"
-        linhas_moeda.append(f"- {m}: {simbolo}{val:,.2f} ({situacao})")
-
-    for m, val_str in moedas.items():
-        if m not in moeda_ordem:
-            val = Decimal(str(val_str))
-            situacao = "positivo" if val >= 0 else "negativo"
-            linhas_moeda.append(f"- {m}: {val:,.2f} ({situacao})")
-
-    moedas_txt = "\n".join(linhas_moeda) if linhas_moeda else "Sem movimentações"
-    ouro_val = Decimal(str(gold_gramas))
-    ouro_situacao = "positivo" if ouro_val >= 0 else "negativo"
-
+    
+    # New structure: each currency directly in saldo
+    saldo_xau = Decimal(str(saldo.get("XAU", "0")))
+    saldo_eur = Decimal(str(saldo.get("EUR", "0")))
+    saldo_usd = Decimal(str(saldo.get("USD", "0")))
+    saldo_srd = Decimal(str(saldo.get("SRD", "0")))
+    saldo_brl = Decimal(str(saldo.get("BRL", "0")))
+    
+    def situacao_txt(val: Decimal) -> str:
+        return "entrou mais 💰" if val > 0 else ("nada" if val == 0 else "saiu mais 📉")
+    
     if requested_currency:
         moeda = requested_currency.upper()
+        
         if moeda == "XAU":
-            ouro_gramas = Decimal(str(gold_gramas))
-            ativo_ouro = db.get_ativo_by_nome("Ouro") or db.get_ativo_by_nome("Ouro 24k")
-            taxa_ouro: Optional[Decimal] = None
-            if ativo_ouro:
-                taxa = db.get_taxa_atual(int(ativo_ouro["id"]))
-                if taxa:
-                    taxa_ouro = Decimal(str(taxa.get("preco_compra", "0")))
-
-            if taxa_ouro and taxa_ouro > 0:
-                saldo_usd = money(ouro_gramas * taxa_ouro)
-                cambio_txt = f"Cotação ouro: {money(taxa_ouro)} USD/g"
-            else:
-                saldo_usd = Decimal("0")
-                cambio_txt = "Sem cotação atual de ouro"
-
             resposta = (
-                f"SALDO ORGANIZADO - XAU\n"
+                f"💰 CAIXA OURO (XAU)\n"
                 f"Data: {day['date']}\n"
                 f"Operações hoje: {ops_hoje}\n"
-                "--------------------\n"
-                f"1) Ouro em estoque: {ouro_gramas:,.3f} g\n"
-                f"2) Referência em USD: {saldo_usd:,.2f}\n"
-                f"3) {cambio_txt}\n"
-                "--------------------\n"
-                "Leitura rápida: quanto maior o valor, maior o estoque de ouro."
+                "════════════════════════════════\n"
+                f"Saldo em estoque: {saldo_xau:,.3f} g\n"
+                f"Status: {situacao_txt(saldo_xau)}\n"
+                "════════════════════════════════"
+            )
+        elif moeda == "EUR":
+            resposta = (
+                f"🇪🇺 CAIXA EURO (EUR)\n"
+                f"Data: {day['date']}\n"
+                f"Operações hoje: {ops_hoje}\n"
+                "════════════════════════════════\n"
+                f"Saldo: EUR {saldo_eur:,.2f}\n"
+                f"Status: {situacao_txt(saldo_eur)}\n"
+                "════════════════════════════════"
+            )
+        elif moeda == "USD":
+            resposta = (
+                f"🇺🇸 CAIXA DÓLAR (USD)\n"
+                f"Data: {day['date']}\n"
+                f"Operações hoje: {ops_hoje}\n"
+                "════════════════════════════════\n"
+                f"Saldo: $ {saldo_usd:,.2f}\n"
+                f"Status: {situacao_txt(saldo_usd)}\n"
+                "════════════════════════════════"
+            )
+        elif moeda == "SRD":
+            resposta = (
+                f"🇸🇷 CAIXA SURINAMÊS (SRD)\n"
+                f"Data: {day['date']}\n"
+                f"Operações hoje: {ops_hoje}\n"
+                "════════════════════════════════\n"
+                f"Saldo: SRD {saldo_srd:,.2f}\n"
+                f"Status: {situacao_txt(saldo_srd)}\n"
+                "════════════════════════════════"
+            )
+        elif moeda == "BRL":
+            resposta = (
+                f"🇧🇷 CAIXA REAL (BRL)\n"
+                f"Data: {day['date']}\n"
+                f"Operações hoje: {ops_hoje}\n"
+                "════════════════════════════════\n"
+                f"Saldo: R$ {saldo_brl:,.2f}\n"
+                f"Status: {situacao_txt(saldo_brl)}\n"
+                "════════════════════════════════"
             )
         else:
-            saldo_moeda = Decimal(str(moedas.get(moeda, "0")))
-            cambio = db.get_last_cambio_para_usd(moeda)
-            if moeda == "USD":
-                saldo_usd = saldo_moeda
-                cambio_txt = "1 USD = 1 USD"
-            elif cambio and cambio > 0:
-                saldo_usd = money(saldo_moeda / cambio)
-                cambio_txt = f"1 USD = {money(cambio)} {moeda}"
-            else:
-                saldo_usd = Decimal("0")
-                cambio_txt = f"Sem câmbio recente"
-
-            resposta = (
-                f"SALDO ORGANIZADO - {moeda}\n"
-                f"Data: {day['date']}\n"
-                f"Operações hoje: {ops_hoje}\n"
-                "--------------------\n"
-                f"1) Saldo em {moeda}: {saldo_moeda:,.2f}\n"
-                f"2) Equivalente em USD: {saldo_usd:,.2f}\n"
-                f"3) Câmbio usado: {cambio_txt}\n"
-                "--------------------\n"
-                "Leitura rápida: positivo = entrou mais, negativo = saiu mais."
-            )
+            resposta = f"Moeda {moeda} não reconhecida. Digite: xau, eur, usd, srd ou brl"
     else:
+        # Default: show all 5 caixas
         resposta = (
-            "SALDO ORGANIZADO\n"
+            f"📊 SALDOS DE TODOS OS 5 CAIXAS\n"
             f"Data: {day['date']}\n"
             f"Operações hoje: {ops_hoje}\n"
-            "====================\n"
-            f"1) Ouro em estoque: {ouro_val:,.3f} g ({ouro_situacao})\n"
-            "2) Saldos por moeda:\n"
-            f"{moedas_txt}\n"
-            "====================\n"
+            "════════════════════════════════════════════\n"
+            f"1) 💰 OURO (XAU):      {saldo_xau:>10,.3f} g\n"
+            f"   Status: {situacao_txt(saldo_xau)}\n"
+            "\n"
+            f"2) 🇪🇺 EURO (EUR):      EUR {saldo_eur:>10,.2f}\n"
+            f"   Status: {situacao_txt(saldo_eur)}\n"
+            "\n"
+            f"3) 🇺🇸 DÓLAR (USD):     $ {saldo_usd:>12,.2f}\n"
+            f"   Status: {situacao_txt(saldo_usd)}\n"
+            "\n"
+            f"4) 🇸🇷 SURINAMÊS (SRD): SRD {saldo_srd:>10,.2f}\n"
+            f"   Status: {situacao_txt(saldo_srd)}\n"
+            "\n"
+            f"5) 🇧🇷 REAL (BRL):      R$ {saldo_brl:>11,.2f}\n"
+            f"   Status: {situacao_txt(saldo_brl)}\n"
+            "════════════════════════════════════════════\n"
             "Como ler:\n"
-            "- positivo: entrou mais do que saiu\n"
-            "- negativo: saiu mais do que entrou"
+            "- 💰 entrou mais: recebemos mais desse caixa\n"
+            "- 📉 saiu mais: gastamos mais desse caixa\n"
+            "- nada: equilibrado\n"
+            "\nPara detalhar um caixa, responda:\n"
+            "1 (ouro) | 2 (euro) | 3 (dólar) | 4 (surinamês) | 5 (real)"
         )
+    
     return {
         "mensagem": resposta,
         "dados": {
             "intencao": "consultar_relatorio",
             "date": day["date"],
-            "gold_gramas": gold_gramas,
-            "moedas": moedas,
+            "saldo_xau": str(saldo_xau),
+            "saldo_eur": str(saldo_eur),
+            "saldo_usd": str(saldo_usd),
+            "saldo_srd": str(saldo_srd),
+            "saldo_brl": str(saldo_brl),
             "ops_hoje": ops_hoje,
             "summary": summary,
             "requested_currency": requested_currency,
@@ -1268,15 +1287,18 @@ def _start_guided_flow_if_requested(
 
 
 def _format_resumo(contexto: Dict[str, Any]) -> str:
+    """Format operation summary WITHOUT USD as single reference.
+    
+    New structure: show pagamentos in each currency independently.
+    Each caixa is updated with its own value, no conversion.
+    """
     pagamentos = contexto.get("pagamentos", [])
     linhas_pagamento: List[str] = []
     for p in pagamentos:
-        linhas_pagamento.append(
-            f"- {p['moeda']}: {p['valor_moeda']} ({p['cambio_para_usd']} -> {p['valor_usd']} USD)"
-        )
-    total_pago = Decimal(str(contexto.get("total_pago_usd", "0")))
-    total_operacao = Decimal(str(contexto.get("total_usd", "0")))
-    diferenca = money(total_operacao - total_pago)
+        moeda = p.get('moeda', 'USD')
+        valor = p.get('valor_moeda', '0')
+        linhas_pagamento.append(f"- {moeda}: {valor}")
+    
     linhas_pagamento_texto = "\n".join(linhas_pagamento) if linhas_pagamento else "- Sem pagamentos informados"
 
     tipo_operacao = str(contexto.get("tipo_operacao") or "")
@@ -1284,36 +1306,36 @@ def _format_resumo(contexto: Dict[str, Any]) -> str:
 
     if tipo_operacao == "compra":
         return (
-            "RESUMO FINAL\n"
+            "📋 RESUMO FINAL - COMPRA\n"
             f"1) Tipo: {contexto.get('tipo_operacao')}\n"
             f"2) Origem: {contexto.get('origem')}\n"
             f"3) Teor: {contexto.get('teor')}%\n"
             f"4) Peso: {contexto.get('peso')}g\n"
-            f"5) Preço USD/g: {contexto.get('preco_usd')}\n"
-            f"6) Total USD: {contexto.get('total_usd')}\n"
-            f"7) {pessoa_label}: {contexto.get('pessoa')}\n"
-            f"8) Forma: {contexto.get('forma_pagamento')}\n"
-            f"9) Pagamentos:\n{linhas_pagamento_texto}\n"
-            f"10) Total pago USD: {money(total_pago)}\n"
-            f"11) Diferença USD: {diferenca}\n"
-            "Se estiver correto, responda: sim. Para cancelar, responda: não."
+            f"5) Preço base: {contexto.get('preco_moeda')} {contexto.get('preco_moeda')} / g\n"
+            f"6) {pessoa_label}: {contexto.get('pessoa')}\n"
+            f"7) Forma de pagamento: {contexto.get('forma_pagamento')}\n"
+            f"8) Pagamentos por moeda:\n{linhas_pagamento_texto}\n"
+            f"9) Observações: {contexto.get('observacoes') or '(nenhuma)'}\n"
+            "════════════════════════════════\n"
+            "Se estiver correto, responda: sim\n"
+            "Para cancelar, responda: não"
         )
 
     return (
-        "RESUMO FINAL\n"
+        "📋 RESUMO FINAL - VENDA\n"
         f"1) Tipo: {contexto.get('tipo_operacao')}\n"
         f"2) Origem: {contexto.get('origem')}\n"
         f"3) Teor: {contexto.get('teor')}%\n"
         f"4) Peso: {contexto.get('peso')}g\n"
-        f"5) Preço USD/g: {contexto.get('preco_usd')}\n"
-        f"6) Total USD: {contexto.get('total_usd')}\n"
-        f"7) Fechamento: {contexto.get('fechamento_gramas')}g ({contexto.get('fechamento_tipo')})\n"
-        f"8) {pessoa_label}: {contexto.get('pessoa')}\n"
-        f"9) Forma: {contexto.get('forma_pagamento')}\n"
-        f"10) Pagamentos:\n{linhas_pagamento_texto}\n"
-        f"11) Total pago USD: {money(total_pago)}\n"
-        f"12) Diferença USD: {diferenca}\n"
-        "Se estiver correto, responda: sim. Para cancelar, responda: não."
+        f"5) Fechamento: {contexto.get('fechamento_gramas')}g ({contexto.get('fechamento_tipo')})\n"
+        f"6) Preço base: {contexto.get('preco_moeda')} / g\n"
+        f"7) {pessoa_label}: {contexto.get('pessoa')}\n"
+        f"8) Forma de pagamento: {contexto.get('forma_pagamento')}\n"
+        f"9) Pagamentos por moeda:\n{linhas_pagamento_texto}\n"
+        f"10) Observações: {contexto.get('observacoes') or '(nenhuma)'}\n"
+        "════════════════════════════════\n"
+        "Se estiver correto, responda: sim\n"
+        "Para cancelar, responda: não"
     )
 
 
@@ -2156,7 +2178,7 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
             )
 
         _clear_session(db, remetente)
-        alerta = "" if not risco_diferenca else " ⚠️ Atenção: diferença acima do limite de risco."
+        alerta = "" if not risco_diferenca else " ⚠️ Atenção: verificar diferença."
 
         gt_id = gold_transaction.get("id") if isinstance(gold_transaction, dict) else None
         tx_id = transacao.get("id") if isinstance(transacao, dict) else None
@@ -2172,35 +2194,36 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
 
         tipo_operacao = str(contexto.get("tipo_operacao", "compra"))
         direcao_txt = "Saiu" if tipo_operacao == "compra" else "Entrou"
+        peso = Decimal(str(contexto.get("peso", "0")))
         mov_linhas: List[str] = []
+        
+        # Show ouro movement
+        mov_linhas.append(f"- {direcao_txt} ouro: {peso:,.3f}g")
+        
+        # Show cada moeda movement (no USD reference)
         for pagamento in pagamentos:
             moeda_pg = str(pagamento.get("moeda", "USD")).upper()
             valor_moeda_pg = Decimal(str(pagamento.get("valor_moeda", "0")))
-            valor_usd_pg = Decimal(str(pagamento.get("valor_usd", "0")))
-            mov_linhas.append(
-                f"- {direcao_txt} {moeda_pg}: {money(valor_moeda_pg)} ({money(valor_usd_pg)} USD)"
-            )
-        mov_txt = "\n".join(mov_linhas) if mov_linhas else "- Sem pagamentos registrados"
+            mov_linhas.append(f"- {direcao_txt} {moeda_pg}: {money(valor_moeda_pg)}")
+        
+        mov_txt = "\n".join(mov_linhas) if mov_linhas else "- Sem movimentação registrada"
 
         response_payload: Dict[str, Any] = {
             "mensagem": (
                 f"✅ Operação salva com sucesso.\n"
                 f"{id_linha}"
-                f"Total USD: {money(total)}\n"
-                f"Pago USD: {money(total_pago)}\n"
-                f"Diferença USD: {diferenca}{alerta}\n"
-                "Movimentação desta operação:\n"
-                f"{mov_txt}\n"
-                "--------------------\n"
+                f"Tipo: {tipo_operacao}\n"
+                f"Peso: {peso:,.3f}g\n"
+                "Movimentação dos 5 caixas:\n"
+                f"{mov_txt}{alerta}\n"
+                "════════════════════════════════\n"
                 f"{caixa_msg}"
             ),
             "dados": {
                 "intencao": "fluxo_guiado_confirmado",
                 "tipo_operacao": contexto.get("tipo_operacao"),
-                "total_usd": str(money(total)),
-                "total_pago_usd": str(money(total_pago)),
-                "diferenca_usd": str(diferenca),
-                "alerta_risco": risco_diferenca,
+                "peso": str(peso),
+                "pagamentos": pagamentos,
             },
         }
         if review_payload:
