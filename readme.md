@@ -303,3 +303,39 @@ uvicorn main:app --reload --host 127.0.0.1 --port 8000
 - Restrict admin-only actions (rate updates)
 - Use HTTPS-only webhooks
 - Rotate exposed credentials immediately
+
+---
+
+## Author and Ownership
+
+Created and maintained by **Daniel Abreu**.
+
+- Repository owner: `dan-abreu`
+- Project: `caixa_whatsapp`
+
+If you are using this project as a base, please keep proper attribution to the original author.
+
+## Credits
+
+- Architecture and implementation: Daniel Abreu
+- AI assistant support (coding and iteration): GitHub Copilot (GPT-5.3-Codex)
+- Platform services: Supabase, Twilio, Railway, Google Gemini
+
+## License
+
+This project currently does not include a formal open-source license file.
+
+Recommendation:
+
+- Add a `LICENSE` file (MIT is a common option for private/prototype projects that may be shared later).
+- If no license is added, all rights are reserved by default.
+
+## Copyright Notice
+
+Copyright (c) 2026 Daniel Abreu. All rights reserved.
+
+## Contact
+
+For business, partnerships, or technical collaboration, contact the project owner through GitHub:
+
+- https://github.com/dan-abreu
