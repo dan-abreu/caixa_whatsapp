@@ -32,7 +32,7 @@ class AIExtractedData(BaseModel):
     @classmethod
     def validate_intencao(cls, value: str) -> str:
         normalized = value.strip().lower()
-        if normalized not in {"atualizar_taxa", "registrar_operacao", "consultar_relatorio", "conversar"}:
+        if normalized not in {"registrar_operacao", "consultar_relatorio", "conversar"}:
             raise ValueError("intencao inválida")
         return normalized
 
@@ -181,18 +181,6 @@ def menu() -> Dict[str, Any]:
             },
             {
                 "id": 4,
-                "nome": "Atualizar taxa",
-                "intencao": "atualizar_taxa",
-                "descricao": "Atualiza taxa de ouro ou moeda.",
-                "exemplos": [
-                    "taxa ouro 105.00",
-                    "taxa usd 5.40"
-                ],
-                "resposta_esperada": "Confirma nova taxa.",
-                "restricoes": "Somente admin"
-            },
-            {
-                "id": 5,
                 "nome": "Editar operacao",
                 "intencao": "editar_operacao",
                 "descricao": "Altera preco, quantidade, moeda, valor_moeda ou cambio de uma operacao existente.",
@@ -203,7 +191,7 @@ def menu() -> Dict[str, Any]:
                 "resposta_esperada": "Confirma o que foi alterado."
             },
             {
-                "id": 6,
+                "id": 5,
                 "nome": "Cancelar operacao",
                 "intencao": "cancelar_operacao",
                 "descricao": "Marca a operacao como cancelada.",
@@ -751,14 +739,12 @@ def _build_whatsapp_checklist_menu() -> str:
         "   Ex: caixa | caixa eur | caixa srd | caixa xau\n\n"
         "3) Extrato detalhado\n"
         "   Ex: extrato | extrato hoje | extrato semana\n\n"
-        "4) Atualizar taxa\n"
-        "   Ex: taxa usd 5.40 | taxa ouro 105\n\n"
-        "5) Editar operacao\n"
+        "4) Editar operacao\n"
         "   Ex: editar 123 preco 110 | editar 123 quantidade 2.5\n\n"
-        "6) Cancelar operacao\n"
+        "5) Cancelar operacao\n"
         "   Ex: cancelar 123\n"
         "──────────────────\n"
-        "Responda com 1 a 6."
+        "Responda com 1 a 5."
     )
 
 
@@ -998,10 +984,10 @@ def _build_extrato_response(
 
 def _handle_menu_option(remetente: str, mensagem: str, db: DatabaseClient) -> Optional[Dict[str, Any]]:
     option = _normalize_text(mensagem)
-    if option not in {"1", "2", "3", "4", "5", "6"}:
+    if option not in {"1", "2", "3", "4", "5"}:
         return {
             "mensagem": (
-                "Opcao invalida. Escolha um numero de 1 a 6.\n\n"
+                "Opcao invalida. Escolha um numero de 1 a 5.\n\n"
                 f"{_build_whatsapp_checklist_menu()}"
             ),
             "dados": {"etapa": "await_menu_option"},
@@ -1041,25 +1027,6 @@ def _handle_menu_option(remetente: str, mensagem: str, db: DatabaseClient) -> Op
 
     if option == "4":
         _clear_session(db, remetente)
-        usuario = db.get_usuario_by_telefone(remetente)
-        if not usuario or usuario.get("tipo_usuario") != "admin":
-            return {
-                "mensagem": (
-                    "Voce nao tem permissao para atualizar taxas. "
-                    "Essa opcao e exclusiva para administradores."
-                ),
-                "dados": {"acao": "atualizar_taxa", "permitido": False},
-            }
-        return {
-            "mensagem": (
-                "Atualizacao de taxa.\n"
-                "Formato: taxa USD 5.40 | taxa ouro 105.00"
-            ),
-            "dados": {"acao": "atualizar_taxa", "permitido": True},
-        }
-
-    if option == "5":
-        _clear_session(db, remetente)
         return {
             "mensagem": (
                 "Editar operacao.\n"
@@ -1072,6 +1039,7 @@ def _handle_menu_option(remetente: str, mensagem: str, db: DatabaseClient) -> Op
             "dados": {"acao": "editar_operacao"},
         }
 
+    # option == "5"
     _clear_session(db, remetente)
     return {
         "mensagem": (
@@ -2559,48 +2527,6 @@ def _processar_webhook(
         raise HTTPException(status_code=404, detail="Ativo nao encontrado")
 
     ativo_id = int(ativo["id"])
-
-    if intencao == "atualizar_taxa":
-        if usuario.get("tipo_usuario") != "admin":
-            db.insert_log(
-                nivel="warning",
-                remetente=remetente,
-                mensagem_recebida=mensagem,
-                contexto={"intencao": intencao},
-                erro="Operador sem permissão para atualizar taxa",
-            )
-            raise HTTPException(status_code=403, detail="Somente admin pode atualizar taxa")
-
-        valor_informado = ai_data.valor_informado
-        if valor_informado is None:
-            valor_informado = ai_data.quantidade
-        nova_taxa = parse_decimal(valor_informado, "valor_informado")
-
-        if nova_taxa <= 0:
-            raise HTTPException(status_code=400, detail="Taxa deve ser maior que zero")
-
-        db.insert_taxa_diaria(ativo_id=ativo_id, preco=nova_taxa, admin_id=remetente)
-        response_payload: Dict[str, Any] = {
-            "mensagem": f"✅ Taxa de {(ativo_extraido or ativo['nome']).lower()} atualizada para ${money(nova_taxa)}",
-            "dados": {
-                "intencao": intencao,
-                "ativo": ativo["nome"],
-                "taxa": str(money(nova_taxa)),
-            },
-        }
-        db.insert_log(
-            nivel="info",
-            remetente=remetente,
-            mensagem_recebida=mensagem,
-            resposta_enviada=response_payload["mensagem"],
-            contexto=response_payload["dados"],
-        )
-        db.save_conversation_session(
-            remetente=remetente,
-            estado="operacao_finalizada",
-            contexto={"ultima_mensagem": mensagem, "ultima_intencao": intencao},
-        )
-        return response_payload
 
     if intencao == "registrar_operacao":
         quantidade = parse_decimal(ai_data.quantidade, "quantidade")
