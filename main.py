@@ -365,9 +365,9 @@ def _build_whatsapp_checklist_menu() -> str:
         "[3] Atualizar taxa (admin)\n"
         "- Exemplo: Taxa USD 5.40\n\n"
         "[4] Editar operacao\n"
-        "- Endpoint: POST /operations/{id}/edit\n\n"
+        "- Exemplo: editar 123 preco 110\n\n"
         "[5] Cancelar operacao\n"
-        "- Endpoint: DELETE /operations/{id}\n\n"
+        "- Exemplo: cancelar 123\n\n"
         "Diga o numero da opcao ou escreva sua solicitacao."
     )
 
@@ -475,8 +475,12 @@ def _handle_menu_option(remetente: str, mensagem: str, db: DatabaseClient) -> Op
         _clear_session(db, remetente)
         return {
             "mensagem": (
-                "Edicao de operacao:\n"
-                "Use o endpoint POST /operations/{id}/edit com os campos que deseja alterar."
+                "Editar operacao (simples):\n"
+                "1) Informe o ID da operacao\n"
+                "2) Informe o campo e o novo valor\n\n"
+                "Exemplos:\n"
+                "- editar 123 preco 110\n"
+                "- editar 123 quantidade 2.5"
             ),
             "dados": {"acao": "editar_operacao"},
         }
@@ -484,8 +488,10 @@ def _handle_menu_option(remetente: str, mensagem: str, db: DatabaseClient) -> Op
     _clear_session(db, remetente)
     return {
         "mensagem": (
-            "Cancelamento de operacao:\n"
-            "Use o endpoint DELETE /operations/{id} para marcar como cancelada."
+            "Cancelar operacao (simples):\n"
+            "- Envie: cancelar ID\n"
+            "Exemplo: cancelar 123\n\n"
+            "A operacao sera marcada como cancelada."
         ),
         "dados": {"acao": "cancelar_operacao"},
     }
