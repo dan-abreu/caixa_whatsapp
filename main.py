@@ -1455,6 +1455,17 @@ def _advance_after_payment_exchange(
     if idx < len(moedas):
         contexto["moeda_index"] = idx
         contexto["moeda_atual"] = moedas[idx]
+        proxima_moeda = str(moedas[idx]).upper()
+        if proxima_moeda != "USD":
+            _save_session(db, remetente, "await_cambio_moeda_pre_valor", contexto)
+            return {
+                "mensagem": (
+                    f"Pago até agora: {money(total_pago_parcial)} USD. Restante: {restante} USD.\n"
+                    f"Antes do valor em {proxima_moeda}, informe o câmbio: {_build_cambio_prompt(proxima_moeda)}"
+                ),
+                "dados": {"etapa": "await_cambio_moeda_pre_valor"},
+            }
+
         _save_session(db, remetente, "await_valor_moeda", contexto)
         return {
             "mensagem": (
@@ -1715,6 +1726,17 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
             total_txt = f"Total da operação: {money(total_moeda)} {preco_moeda}."
         else:
             total_txt = "Total da operação definido."
+
+        primeira_moeda = str(moedas[0]).upper()
+        if primeira_moeda != "USD":
+            _save_session(db, remetente, "await_cambio_moeda_pre_valor", contexto)
+            return {
+                "mensagem": (
+                    f"{total_txt}\n"
+                    f"Antes do valor em {primeira_moeda}, informe o câmbio: {_build_cambio_prompt(primeira_moeda)}"
+                ),
+                "dados": {"etapa": "await_cambio_moeda_pre_valor"},
+            }
 
         return {
             "mensagem": (
