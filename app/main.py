@@ -350,6 +350,7 @@ _GUIDED_FLOW_STATES = {
     "await_menu_option",
     "await_menu_tipo_operacao",
     "await_nome_usuario",
+    "await_caixa_detalhe",
     "await_origem",
     "await_teor",
     "await_peso",
@@ -696,6 +697,11 @@ def _guided_try_back_command(
 def _extract_caixa_currency(message: str) -> Optional[str]:
     text = _normalize_text(message)
     aliases = {
+        "1": "XAU",
+        "2": "EUR",
+        "3": "USD",
+        "4": "SRD",
+        "5": "BRL",
         "usd": "USD",
         "dolar": "USD",
         "dolar americano": "USD",
@@ -708,10 +714,145 @@ def _extract_caixa_currency(message: str) -> Optional[str]:
         "xau": "XAU",
         "ouro": "XAU",
     }
-    for token in re.split(r"[^a-zA-Z]+", text):
+    if text in aliases:
+        return aliases[text]
+    for token in re.split(r"[^a-zA-Z0-9]+", text):
         if token in aliases:
             return aliases[token]
     return None
+
+
+def _format_caixa_movement(currency: str, movement: Decimal) -> str:
+    signal = "+" if movement >= 0 else "-"
+    magnitude = abs(movement)
+    if currency == "XAU":
+        return f"{signal}{magnitude:,.3f} g"
+    if currency == "USD":
+        return f"{signal}$ {magnitude:,.2f}"
+    if currency == "EUR":
+        return f"{signal}EUR {magnitude:,.2f}"
+    if currency == "SRD":
+        return f"{signal}SRD {magnitude:,.2f}"
+    if currency == "BRL":
+        return f"{signal}R$ {magnitude:,.2f}"
+    return f"{signal}{currency} {magnitude:,.2f}"
+
+
+def _build_caixa_detail_response(
+    db: DatabaseClient,
+    currency: str,
+    start_iso: str,
+    end_iso: str,
+    label_periodo: str,
+) -> Dict[str, Any]:
+    currency_up = currency.upper()
+    saldo = db.get_saldo_caixa()
+    transactions = db.get_extrato_transactions(start_iso, end_iso)
+    tz_offset_hours = int(os.getenv("TZ_OFFSET_HOURS", "-3"))
+
+    caixa_titles = {
+        "XAU": "CAIXA OURO (XAU)",
+        "EUR": "CAIXA EURO (EUR)",
+        "USD": "CAIXA DOLAR (USD)",
+        "SRD": "CAIXA SURINAMES (SRD)",
+        "BRL": "CAIXA REAL (BRL)",
+    }
+
+    movement_rows: List[Dict[str, Any]] = []
+    total_entries = Decimal("0")
+    total_exits = Decimal("0")
+
+    for tx in transactions:
+        tipo = str(tx.get("tipo_operacao") or "").lower()
+        if tipo not in {"compra", "venda", "cambio"}:
+            continue
+
+        movement = Decimal("0")
+        if currency_up == "XAU":
+            peso = Decimal(str(tx.get("peso") or "0"))
+            if tipo == "compra":
+                movement = peso
+            elif tipo in {"venda", "cambio"}:
+                movement = -peso
+        else:
+            pagamentos_raw = tx.get("pagamentos")
+            pagamentos = cast(List[Dict[str, Any]], pagamentos_raw) if isinstance(pagamentos_raw, list) else []
+            if pagamentos:
+                for pagamento in pagamentos:
+                    moeda = str(pagamento.get("moeda") or "USD").upper()
+                    if moeda != currency_up:
+                        continue
+                    valor_moeda = Decimal(str(pagamento.get("valor_moeda") or "0"))
+                    movement += -valor_moeda if tipo == "compra" else valor_moeda
+            else:
+                moeda = str(tx.get("moeda") or "USD").upper()
+                if moeda == currency_up:
+                    valor_moeda = Decimal(str(tx.get("valor_moeda") or tx.get("total_usd") or "0"))
+                    movement = -valor_moeda if tipo == "compra" else valor_moeda
+
+        if movement == 0:
+            continue
+
+        raw_dt = str(tx.get("criado_em") or "")
+        try:
+            dt = datetime.fromisoformat(raw_dt.replace("Z", "+00:00"))
+            dt_local = dt + timedelta(hours=tz_offset_hours)
+            data_fmt = dt_local.strftime("%d/%m %H:%M")
+        except Exception:
+            data_fmt = raw_dt[:16]
+
+        if movement > 0:
+            total_entries += movement
+        else:
+            total_exits += abs(movement)
+
+        movement_rows.append(
+            {
+                "data_fmt": data_fmt,
+                "tipo": tipo.upper(),
+                "movimento": movement,
+                "descricao": str(tx.get("pessoa") or tx.get("source") or "").strip(),
+            }
+        )
+
+    saldo_atual = Decimal(str(saldo.get(currency_up, "0")))
+    lines = [
+        f"EXTRATO {caixa_titles.get(currency_up, currency_up)}",
+        f"Periodo: {label_periodo}",
+        "================================",
+    ]
+
+    if movement_rows:
+        for row in movement_rows:
+            line = (
+                f"{row['data_fmt']} | {row['tipo']} | "
+                f"{_format_caixa_movement(currency_up, cast(Decimal, row['movimento']))}"
+            )
+            if row["descricao"]:
+                line += f" | {row['descricao'][:30]}"
+            lines.append(line)
+    else:
+        lines.append("Nenhuma movimentacao neste periodo.")
+
+    lines.extend(
+        [
+            "================================",
+            f"Entradas: {_format_caixa_movement(currency_up, total_entries)}",
+            f"Saidas: {_format_caixa_movement(currency_up, -total_exits)}",
+            f"Saldo atual: {_format_caixa_movement(currency_up, saldo_atual)}",
+        ]
+    )
+
+    return {
+        "mensagem": "\n".join(lines),
+        "dados": {
+            "intencao": "consultar_relatorio",
+            "requested_currency": currency_up,
+            "periodo": label_periodo,
+            "movimentos": len(movement_rows),
+            "saldo_atual": str(saldo_atual),
+        },
+    }
 
 
 def _is_help_menu_request(message: str) -> bool:
@@ -1267,8 +1408,9 @@ def _handle_menu_option(remetente: str, mensagem: str, db: DatabaseClient) -> Op
         }
 
     if option == "2":
-        _clear_session(db, remetente)
-        return _build_caixa_response(db)
+        response = _build_caixa_response(db)
+        _save_session(db, remetente, "await_caixa_detalhe", {"source": "menu_caixa"})
+        return response
 
     if option == "3":
         _clear_session(db, remetente)
@@ -2407,6 +2549,20 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
         contexto["cambio_para_usd"] = str(cambio)
         return _finish_transacao_simples(db, remetente, mensagem, contexto)
 
+    if estado == "await_caixa_detalhe":
+        requested_currency = _extract_caixa_currency(mensagem)
+        if not requested_currency:
+            return {
+                "mensagem": (
+                    "Escolha um caixa para detalhar:\n"
+                    "1 (ouro) | 2 (euro) | 3 (dolar) | 4 (surinames) | 5 (real)"
+                ),
+                "dados": {"etapa": "await_caixa_detalhe"},
+            }
+        day = _build_day_range(None)
+        _clear_session(db, remetente)
+        return _build_caixa_detail_response(db, requested_currency, day["start"], day["end"], f"Hoje ({day['date']})")
+
     # ── Extrato guided flow ──────────────────────────────────────────────────
     if estado == "await_extrato_periodo":
         escolha = _normalize_text(mensagem)
@@ -3513,14 +3669,26 @@ def _processar_webhook(
 
     if intencao == "consultar_relatorio":
         requested_currency = _extract_caixa_currency(mensagem)
-        response_payload = _build_caixa_response(db, requested_currency=requested_currency)
+        if requested_currency:
+            day = _build_day_range(None)
+            response_payload = _build_caixa_detail_response(
+                db,
+                requested_currency,
+                day["start"],
+                day["end"],
+                f"Hoje ({day['date']})",
+            )
+            _clear_session(db, remetente)
+        else:
+            response_payload = _build_caixa_response(db, requested_currency=requested_currency)
+            _save_session(
+                db=db,
+                remetente=remetente,
+                estado="await_caixa_detalhe",
+                contexto={"source": "caixa_summary"},
+            )
         resposta = response_payload["mensagem"]
         day = {"date": str(response_payload["dados"].get("date", ""))}
-        db.save_conversation_session(
-            remetente=remetente,
-            estado="conversando",
-            contexto={"ultima_mensagem": mensagem, "ultima_intencao": intencao},
-        )
         db.insert_log(
             nivel="info",
             remetente=remetente,
