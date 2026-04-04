@@ -2009,7 +2009,13 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
         alerta = "" if not risco_diferenca else " ⚠️ Atenção: diferença acima do limite de risco."
 
         gt_id = gold_transaction.get("id") if isinstance(gold_transaction, dict) else None
-        id_linha = f"ID: GT-{gt_id}\n" if gt_id else ""
+        tx_id = transacao.get("id") if isinstance(transacao, dict) else None
+        if gt_id:
+            id_linha = f"ID: GT-{gt_id}\n"
+        elif tx_id:
+            id_linha = f"ID: T-{tx_id}\n"
+        else:
+            id_linha = ""
 
         caixa_resp = _build_caixa_response(db)
         caixa_msg = str(caixa_resp.get("mensagem", ""))

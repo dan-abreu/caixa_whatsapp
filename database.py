@@ -542,7 +542,20 @@ class DatabaseClient:
                             "criado_em": datetime.now(timezone.utc).isoformat(),
                         }
                     )
-                self.client.table("gold_payments").insert(rows).execute()
+
+                # Best-effort: some environments may not have criado_em in gold_payments yet.
+                try:
+                    self.client.table("gold_payments").insert(rows).execute()
+                except Exception:
+                    rows_fallback: List[Dict[str, Any]] = []
+                    for row in rows:
+                        row_copy = dict(row)
+                        row_copy.pop("criado_em", None)
+                        rows_fallback.append(row_copy)
+                    try:
+                        self.client.table("gold_payments").insert(rows_fallback).execute()
+                    except Exception:
+                        pass
 
             op_kind = str(payload.get("tipo_operacao", "compra"))
             total_usd = Decimal(str(payload.get("total_usd", 0)))
@@ -1142,15 +1155,23 @@ class DatabaseClient:
 
             gt_resp = (
                 self.client.table("gold_transactions")
-                .select("id,tipo_operacao,peso")
+                .select("id,tipo_operacao,peso,contexto")
                 .execute()
             )
             gt_rows = cast(List[Dict[str, Any]], gt_resp.data or [])
             gt_tipo_map: Dict[int, str] = {}
+            gt_context_pagamentos: Dict[int, List[Dict[str, Any]]] = {}
             for row in gt_rows:
                 gid = int(row.get("id", 0))
                 tipo = str(row.get("tipo_operacao", ""))
                 gt_tipo_map[gid] = tipo
+
+                contexto_raw = row.get("contexto")
+                if isinstance(contexto_raw, dict):
+                    pagamentos_ctx = contexto_raw.get("pagamentos")
+                    if isinstance(pagamentos_ctx, list):
+                        gt_context_pagamentos[gid] = [p for p in pagamentos_ctx if isinstance(p, dict)]
+
                 peso = Decimal(str(row.get("peso", "0")))
                 if tipo == "compra":
                     gold_gramas += peso
@@ -1163,17 +1184,34 @@ class DatabaseClient:
                 .execute()
             )
             gp_rows = cast(List[Dict[str, Any]], gp_resp.data or [])
+            gp_tx_ids: set[int] = set()
             for row in gp_rows:
                 moeda = str(row.get("moeda", "USD")).upper()
                 val = Decimal(str(row.get("valor_moeda", "0")))
                 gid = int(row.get("gold_transaction_id", 0))
                 tipo = gt_tipo_map.get(gid, "compra")
+                gp_tx_ids.add(gid)
 
                 currency_map.setdefault(moeda, Decimal("0"))
                 if tipo == "venda":
                     currency_map[moeda] += val
                 elif tipo == "compra":
                     currency_map[moeda] -= val
+
+            # Fallback: if payments table misses rows for a guided transaction,
+            # derive per-currency movement from the transaction contexto.pagamentos.
+            for gid, pagamentos in gt_context_pagamentos.items():
+                if gid in gp_tx_ids:
+                    continue
+                tipo = gt_tipo_map.get(gid, "compra")
+                for pagamento in pagamentos:
+                    moeda = str(pagamento.get("moeda", "USD")).upper()
+                    val = Decimal(str(pagamento.get("valor_moeda", "0")))
+                    currency_map.setdefault(moeda, Decimal("0"))
+                    if tipo == "venda":
+                        currency_map[moeda] += val
+                    elif tipo == "compra":
+                        currency_map[moeda] -= val
 
             return {
                 "gold_gramas": str(gold_gramas),
