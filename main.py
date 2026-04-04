@@ -247,6 +247,7 @@ _GUIDED_FLOW_STATES = {
     "await_origem",
     "await_teor",
     "await_peso",
+    "await_preco_moeda",
     "await_preco_usd",
     "await_preco_cambio",
     "await_moedas",
@@ -925,9 +926,9 @@ def _start_guided_flow_if_requested(
     provider_message_id: Optional[str],
 ) -> Optional[Dict[str, Any]]:
     text = _normalize_text(mensagem)
-    if "compra" in text:
+    if any(token in text for token in {"compra", "comprei", "comprar", "buy", "bought"}):
         tipo = "compra"
-    elif "venda" in text:
+    elif any(token in text for token in {"venda", "vendi", "vender", "sell", "sold"}):
         tipo = "venda"
     else:
         return None
@@ -1162,12 +1163,26 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
         if peso <= 0:
             return {"mensagem": "O peso deve ser maior que zero.", "dados": {"etapa": estado}}
         contexto["peso"] = str(peso)
-        _save_session(db, remetente, "await_preco_usd", contexto)
+        _save_session(db, remetente, "await_preco_moeda", contexto)
         return {
             "mensagem": (
-                "Qual o preço por grama?\n"
-                "Você pode informar em USD ou EUR. Ex.: '115 USD' ou '105 EUR'."
+                "Qual caixa base para precificação?\n"
+                "Responda com: USD, EUR, SRD ou BRL"
             ),
+            "dados": {"etapa": "await_preco_moeda"},
+        }
+
+    if estado == "await_preco_moeda":
+        moeda_preco = _normalize_text(mensagem).upper()
+        if moeda_preco not in _MOEDAS_SUPORTADAS:
+            return {
+                "mensagem": "Moeda inválida. Escolha: USD, EUR, SRD ou BRL.",
+                "dados": {"etapa": estado},
+            }
+        contexto["preco_moeda"] = moeda_preco
+        _save_session(db, remetente, "await_preco_usd", contexto)
+        return {
+            "mensagem": f"Qual o preço por grama em {moeda_preco}?",
             "dados": {"etapa": "await_preco_usd"},
         }
 
@@ -1176,15 +1191,14 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
         if preco <= 0:
             return {"mensagem": "O preço deve ser maior que zero.", "dados": {"etapa": estado}}
 
-        preco_text = _normalize_text(mensagem)
-        if "eur" in preco_text or "euro" in preco_text:
-            contexto["preco_moeda"] = "EUR"
+        preco_moeda = str(contexto.get("preco_moeda", "USD")).upper()
+        if preco_moeda != "USD":
             contexto["preco_moeda_valor"] = str(money(preco))
             _save_session(db, remetente, "await_preco_cambio", contexto)
             return {
                 "mensagem": (
-                    f"Preço recebido: {money(preco)} EUR/g.\n"
-                    "Informe o câmbio para converter para USD (1 USD = quantos EUR?)."
+                    f"Preço recebido: {money(preco)} {preco_moeda}/g.\n"
+                    f"Informe o câmbio para converter para USD (1 USD = quantos {preco_moeda}?)."
                 ),
                 "dados": {"etapa": "await_preco_cambio"},
             }
@@ -1207,18 +1221,19 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
         if cambio <= 0:
             return {"mensagem": "O câmbio deve ser maior que zero.", "dados": {"etapa": estado}}
 
-        preco_eur = Decimal(str(contexto.get("preco_moeda_valor", "0")))
-        preco_usd = money(preco_eur / cambio)
+        preco_moeda = str(contexto.get("preco_moeda", "USD")).upper()
+        preco_moeda_valor = Decimal(str(contexto.get("preco_moeda_valor", "0")))
+        preco_usd = money(preco_moeda_valor / cambio)
         peso = Decimal(str(contexto.get("peso")))
         total = money(peso * preco_usd)
 
         contexto["preco_usd"] = str(preco_usd)
-        contexto["cambio_preco_eur"] = str(money(cambio))
+        contexto["cambio_preco_moeda"] = str(money(cambio))
         contexto["total_usd"] = str(total)
         _save_session(db, remetente, "await_moedas", contexto)
         return {
             "mensagem": (
-                f"Conversão: {money(preco_eur)} EUR/g ÷ {money(cambio)} = {preco_usd} USD/g.\n"
+                f"Conversão: {money(preco_moeda_valor)} {preco_moeda}/g ÷ {money(cambio)} = {preco_usd} USD/g.\n"
                 f"Total da operação: {peso}g x {preco_usd} = {total} USD.\n"
                 "Pagamento em quais moedas? (USD, EUR, SRD, BRL)"
             ),
