@@ -63,6 +63,17 @@ class DatabaseClient:
         data = cast(List[Dict[str, Any]], response.data or [])
         return data[0] if data else None
 
+    def update_usuario_nome(self, telefone: str, nome: str) -> Optional[Dict[str, Any]]:
+        response = (
+            self.client.table("usuarios")
+            .update({"nome": nome})
+            .eq("telefone", telefone)
+            .eq("ativo", True)
+            .execute()
+        )
+        data = cast(List[Dict[str, Any]], response.data or [])
+        return data[0] if data else None
+
     def insert_taxa_diaria(self, ativo_id: int, preco: Decimal, admin_id: str) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
             "ativo_id": ativo_id,

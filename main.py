@@ -243,6 +243,7 @@ _MULTI_AGENT_AUTO_MIN_WEIGHT_GRAMS = Decimal(os.getenv("MULTI_AGENT_AUTO_MIN_WEI
 _GUIDED_FLOW_STATES = {
     "await_menu_option",
     "await_menu_tipo_operacao",
+    "await_nome_usuario",
     "await_origem",
     "await_teor",
     "await_peso",
@@ -321,6 +322,25 @@ def _is_help_menu_request(message: str) -> bool:
         "funcionalidades",
     ]
     return any(k in text for k in keywords)
+
+
+def _is_greeting(message: str) -> bool:
+    text = _normalize_text(message)
+    greetings = {"oi", "ola", "olá", "bom dia", "boa tarde", "boa noite", "hello", "hi"}
+    return text in greetings
+
+
+def _sanitize_nome(value: str) -> str:
+    cleaned = re.sub(r"\s+", " ", value).strip()
+    return cleaned[:80]
+
+
+def _needs_name_onboarding(usuario: Dict[str, Any]) -> bool:
+    nome = str(usuario.get("nome") or "").strip().lower()
+    if not nome:
+        return True
+    placeholders = {"operador", "usuario", "usuário", "sem nome", "unknown", "n/a"}
+    return nome in placeholders
 
 
 def _build_whatsapp_checklist_menu() -> str:
@@ -660,6 +680,24 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
         menu_result = _handle_menu_option(remetente, mensagem, db)
         if menu_result is not None:
             return menu_result
+
+    if estado == "await_nome_usuario":
+        nome = _sanitize_nome(mensagem)
+        if len(nome) < 2:
+            return {
+                "mensagem": "Nome invalido. Informe seu nome com pelo menos 2 caracteres.",
+                "dados": {"etapa": "await_nome_usuario"},
+            }
+
+        db.update_usuario_nome(remetente, nome)
+        _clear_session(db, remetente)
+        return {
+            "mensagem": (
+                f"Prazer, {nome}. Seu cadastro foi atualizado com sucesso.\n"
+                "Envie 'menu' para ver o checklist de funcionalidades."
+            ),
+            "dados": {"acao": "cadastro_nome", "nome": nome},
+        }
 
     if estado == "await_menu_tipo_operacao":
         if text not in {"compra", "venda"}:
@@ -1514,6 +1552,13 @@ def _processar_webhook(
     if maybe_start:
         return maybe_start
 
+    if _is_greeting(mensagem) and _needs_name_onboarding(usuario):
+        _save_session(db, remetente, "await_nome_usuario", {"source": "onboarding"})
+        return {
+            "mensagem": "Oi! Antes de comecarmos, qual e o seu nome?",
+            "dados": {"etapa": "await_nome_usuario"},
+        }
+
     try:
         raw_ai_data = extract_message_data(mensagem)
         ai_data = AIExtractedData.model_validate(raw_ai_data)
@@ -1541,6 +1586,7 @@ def _processar_webhook(
     ativo_extraido = ai_data.ativo
 
     if intencao == "conversar":
+        nome_usuario = str(usuario.get("nome") or "").strip()
         if _is_help_menu_request(mensagem):
             resposta = _build_whatsapp_checklist_menu()
             db.save_conversation_session(
@@ -1552,6 +1598,13 @@ def _processar_webhook(
             resposta = ai_data.resposta or (
                 "Posso te ajudar com operacoes, extrato e taxas. "
                 "Se quiser, envie 'menu' para ver um checklist completo."
+            )
+
+        if _is_greeting(mensagem) and nome_usuario:
+            resposta = (
+                f"Oi, {nome_usuario}. Seja bem-vindo.\n"
+                "Estou pronto para te ajudar com suas operacoes.\n\n"
+                "Envie 'menu' para ver o checklist de funcionalidades."
             )
         response_payload: Dict[str, Any] = {
             "mensagem": resposta,
