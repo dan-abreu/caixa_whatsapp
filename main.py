@@ -113,6 +113,24 @@ def _twiml_message(text: str) -> Response:
     return Response(content=xml, media_type="application/xml")
 
 
+def _twiml_empty_response() -> Response:
+    xml = '<?xml version="1.0" encoding="UTF-8"?><Response></Response>'
+    return Response(content=xml, media_type="application/xml")
+
+
+def _should_suppress_twilio_reply(message: str) -> bool:
+    mode = os.getenv("TWILIO_REPLY_MODE", "normal").strip().lower()
+    if mode == "silent_all":
+        return True
+    if mode != "silent_prefix":
+        return False
+
+    prefix = os.getenv("TWILIO_SILENT_PREFIX", "debug:").strip().lower()
+    if not prefix:
+        return False
+    return message.strip().lower().startswith(prefix)
+
+
 @app.get("/health")
 def healthcheck() -> Dict[str, str]:
     return {"status": "ok"}
@@ -1848,6 +1866,7 @@ async def whatsapp_webhook_twilio(
         return _twiml_message("⚠️ Payload inválido: informe remetente e mensagem.")
 
     payload = WhatsAppWebhookPayload(remetente=remetente, mensagem=mensagem)
+    suppress_reply = _should_suppress_twilio_reply(mensagem)
     db: Optional[DatabaseClient] = None
 
     try:
@@ -1857,9 +1876,13 @@ async def whatsapp_webhook_twilio(
         if provider_message_id:
             existing = db.get_processed_message(provider_message_id)
             if existing and isinstance(existing.get("resposta_payload"), dict):
+                if suppress_reply:
+                    return _twiml_empty_response()
                 return _twiml_message(str(existing["resposta_payload"].get("mensagem") or ""))
             cached = _IDEMPOTENCY_CACHE.get(provider_message_id)
             if cached:
+                if suppress_reply:
+                    return _twiml_empty_response()
                 return _twiml_message(str(cached.get("mensagem") or ""))
 
         response = _processar_webhook(payload, db, provider_message_id)
@@ -1874,6 +1897,8 @@ async def whatsapp_webhook_twilio(
             )
             _IDEMPOTENCY_CACHE[provider_message_id] = response
 
+        if suppress_reply:
+            return _twiml_empty_response()
         return _twiml_message(str(response.get("mensagem") or "Operação processada."))
     except HTTPException as exc:
         msg = _ERROS_AMIGAVEIS.get(exc.status_code, str(exc.detail))
@@ -1890,9 +1915,13 @@ async def whatsapp_webhook_twilio(
                 status_code=exc.status_code,
             )
             _IDEMPOTENCY_CACHE[provider_message_id] = response_payload
+        if suppress_reply:
+            return _twiml_empty_response()
         return _twiml_message(response_payload["mensagem"])
     except Exception:
         logger.exception("Erro inesperado no webhook Twilio")
+        if suppress_reply:
+            return _twiml_empty_response()
         return _twiml_message("⚠️ Ocorreu um erro inesperado. Tente novamente.")
 
 
