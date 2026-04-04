@@ -310,6 +310,150 @@ def _extract_moedas(value: str) -> List[str]:
     return found
 
 
+def _guided_prompt_for_state(state: str, contexto: Dict[str, Any]) -> str:
+    if state == "await_teor":
+        return "Qual o teor do ouro em %? (0 a 99.99)"
+    if state == "await_peso":
+        return "Quantas gramas?"
+    if state == "await_preco_usd":
+        return "Qual o preço por grama? Você pode informar em USD ou EUR. Ex.: '115 USD' ou '105 EUR'."
+    if state == "await_preco_cambio":
+        return "Informe o câmbio para converter para USD (1 USD = quantos EUR?)."
+    if state == "await_moedas":
+        return "Pagamento em quais moedas? (USD, EUR, SRD, BRL)"
+    if state == "await_valor_moeda":
+        moeda_atual = str(contexto.get("moeda_atual") or "a moeda")
+        return f"Quanto será pago em {moeda_atual}?"
+    if state == "await_cambio_moeda":
+        moeda_atual = str(contexto.get("moeda_atual") or "a moeda")
+        return f"Qual o câmbio do {moeda_atual} para USD? (1 USD = quantos {moeda_atual})"
+    if state == "await_fechamento_gramas":
+        return "Quantas gramas foram fechadas?"
+    if state == "await_fechamento_tipo":
+        return "Fechamento total ou parcial?"
+    if state == "await_pessoa":
+        return "Nome do vendedor/comprador?"
+    if state == "await_forma_pagamento":
+        return "Forma de pagamento? (dinheiro, transferencia, cheque, misto)"
+    if state == "await_observacoes":
+        return "Deseja adicionar observações? (ou digite 'nenhuma')"
+    return "Vamos continuar a operação."
+
+
+def _guided_clear_from_step(contexto: Dict[str, Any], target_state: str) -> Dict[str, Any]:
+    cleared = dict(contexto)
+    order = [
+        "await_teor",
+        "await_peso",
+        "await_preco_usd",
+        "await_preco_cambio",
+        "await_moedas",
+        "await_valor_moeda",
+        "await_cambio_moeda",
+        "await_fechamento_gramas",
+        "await_fechamento_tipo",
+        "await_pessoa",
+        "await_forma_pagamento",
+        "await_observacoes",
+    ]
+    fields_by_step: Dict[str, List[str]] = {
+        "await_teor": ["teor"],
+        "await_peso": ["peso"],
+        "await_preco_usd": ["preco_moeda", "preco_moeda_valor", "preco_usd", "cambio_preco_eur", "total_usd"],
+        "await_preco_cambio": ["cambio_preco_eur", "preco_usd", "total_usd"],
+        "await_moedas": ["moedas", "moeda_index", "moeda_atual", "pagamentos", "total_pago_usd"],
+        "await_valor_moeda": ["pagamentos", "total_pago_usd"],
+        "await_cambio_moeda": ["pagamentos", "total_pago_usd"],
+        "await_fechamento_gramas": ["fechamento_gramas", "fechamento_tipo", "pessoa", "forma_pagamento", "observacoes"],
+        "await_fechamento_tipo": ["fechamento_tipo", "pessoa", "forma_pagamento", "observacoes"],
+        "await_pessoa": ["pessoa", "forma_pagamento", "observacoes"],
+        "await_forma_pagamento": ["forma_pagamento", "observacoes"],
+        "await_observacoes": ["observacoes"],
+    }
+
+    start_clearing = False
+    for step in order:
+        if step == target_state:
+            start_clearing = True
+        if start_clearing:
+            for field in fields_by_step.get(step, []):
+                cleared.pop(field, None)
+    return cleared
+
+
+def _guided_try_back_command(
+    remetente: str,
+    mensagem: str,
+    estado: str,
+    contexto: Dict[str, Any],
+    db: DatabaseClient,
+) -> Optional[Dict[str, Any]]:
+    text = _normalize_text(mensagem)
+    if not (text.startswith("voltar") or text.startswith("editar") or text.startswith("corrigir")):
+        return None
+
+    aliases: Dict[str, str] = {
+        "teor": "await_teor",
+        "peso": "await_peso",
+        "gramas": "await_peso",
+        "preco": "await_preco_usd",
+        "preco usd": "await_preco_usd",
+        "cotacao": "await_preco_usd",
+        "cambio preco": "await_preco_cambio",
+        "moedas": "await_moedas",
+        "moeda": "await_moedas",
+        "pagamento": "await_valor_moeda",
+        "valor": "await_valor_moeda",
+        "cambio": "await_cambio_moeda",
+        "fechamento": "await_fechamento_gramas",
+        "pessoa": "await_pessoa",
+        "nome": "await_pessoa",
+        "forma": "await_forma_pagamento",
+        "observacoes": "await_observacoes",
+        "observacao": "await_observacoes",
+    }
+
+    # "voltar" simples = etapa anterior mais segura
+    if text in {"voltar", "corrigir", "editar"}:
+        previous_map: Dict[str, str] = {
+            "await_peso": "await_teor",
+            "await_preco_usd": "await_peso",
+            "await_preco_cambio": "await_preco_usd",
+            "await_moedas": "await_preco_usd",
+            "await_valor_moeda": "await_moedas",
+            "await_cambio_moeda": "await_valor_moeda",
+            "await_fechamento_gramas": "await_moedas",
+            "await_fechamento_tipo": "await_fechamento_gramas",
+            "await_pessoa": "await_fechamento_tipo",
+            "await_forma_pagamento": "await_pessoa",
+            "await_observacoes": "await_forma_pagamento",
+            "await_confirmacao": "await_observacoes",
+        }
+        target_state = previous_map.get(estado)
+    else:
+        target_state = None
+        for key, mapped_state in aliases.items():
+            if key in text:
+                target_state = mapped_state
+                break
+
+    if not target_state:
+        return {
+            "mensagem": (
+                "Para corrigir sem cancelar, use por exemplo: 'voltar peso', 'voltar preco' ou 'voltar teor'."
+            ),
+            "dados": {"etapa": estado},
+        }
+
+    novo_contexto = _guided_clear_from_step(contexto, target_state)
+    _save_session(db, remetente, target_state, novo_contexto)
+    prompt = _guided_prompt_for_state(target_state, novo_contexto)
+    return {
+        "mensagem": f"Ok, vamos corrigir essa parte.\n{prompt}",
+        "dados": {"etapa": target_state, "acao": "voltar_editar"},
+    }
+
+
 def _extract_caixa_currency(message: str) -> Optional[str]:
     text = _normalize_text(message)
     aliases = {
@@ -953,6 +1097,10 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
         menu_result = _handle_menu_option(remetente, mensagem, db)
         if menu_result is not None:
             return menu_result
+
+    back_result = _guided_try_back_command(remetente, mensagem, estado, contexto, db)
+    if back_result is not None and estado in _GUIDED_FLOW_STATES:
+        return back_result
 
     if estado == "await_nome_usuario":
         nome = _sanitize_nome(mensagem)
