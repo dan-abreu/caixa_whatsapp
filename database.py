@@ -265,25 +265,39 @@ class DatabaseClient:
             return None
 
     def get_daily_gold_summary(self, start_iso: str, end_iso: str) -> Dict[str, Any]:
-        # Soft-fail if enterprise tables are not migrated yet.
+        """Count operations from BOTH transacoes (simple) and gold_transactions (guided) tables."""
         try:
-            response = (
+            # Count simple transacoes (quick flow)
+            resp_t = (
+                self.client.table("transacoes")
+                .select("id,valor_total")
+                .gte("data_hora", start_iso)
+                .lt("data_hora", end_iso)
+                .execute()
+            )
+            t_rows = cast(List[Dict[str, Any]], resp_t.data or [])
+            t_ops = len(t_rows)
+            t_usd = sum((Decimal(str(r.get("valor_total", 0))) for r in t_rows), Decimal("0"))
+
+            # Count enterprise gold_transactions (guided flow)
+            resp_g = (
                 self.client.table("gold_transactions")
                 .select("id,total_usd,total_pago_usd,diferenca_usd")
                 .gte("criado_em", start_iso)
                 .lt("criado_em", end_iso)
                 .execute()
             )
-            rows = cast(List[Dict[str, Any]], response.data or [])
-            total_ops = len(rows)
-            total_usd = sum((Decimal(str(r.get("total_usd", 0))) for r in rows), Decimal("0"))
-            total_pago = sum((Decimal(str(r.get("total_pago_usd", 0))) for r in rows), Decimal("0"))
-            total_diff = sum((Decimal(str(r.get("diferenca_usd", 0))) for r in rows), Decimal("0"))
+            g_rows = cast(List[Dict[str, Any]], resp_g.data or [])
+            g_ops = len(g_rows)
+            g_usd = sum((Decimal(str(r.get("total_usd", 0))) for r in g_rows), Decimal("0"))
+            g_pago = sum((Decimal(str(r.get("total_pago_usd", 0))) for r in g_rows), Decimal("0"))
+            g_diff = sum((Decimal(str(r.get("diferenca_usd", 0))) for r in g_rows), Decimal("0"))
+
             return {
-                "total_operacoes": total_ops,
-                "total_usd": str(total_usd),
-                "total_pago_usd": str(total_pago),
-                "total_diferenca_usd": str(total_diff),
+                "total_operacoes": t_ops + g_ops,
+                "total_usd": str(t_usd + g_usd),
+                "total_pago_usd": str(g_pago),
+                "total_diferenca_usd": str(g_diff),
             }
         except Exception:
             return {

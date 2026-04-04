@@ -877,6 +877,13 @@ def _finish_transacao_simples(
         cambio_para_usd=cambio,
     )
 
+    # Generate unique operation ID
+    transacao_id = transacao.get("id")
+    tz_offset = int(os.getenv("TZ_OFFSET_HOURS", "-3"))
+    data_agora = datetime.now(timezone.utc) + timedelta(hours=tz_offset)
+    data_str = data_agora.strftime("%Y%m%d")
+    op_id = f"OP-{data_str}-{transacao_id:05d}" if transacao_id else "OP-UNKNOWN"
+
     review_payload: Optional[Dict[str, Any]] = None
     review_transaction: Dict[str, Any] = {
         "tipo_operacao": tipo_operacao,
@@ -911,16 +918,37 @@ def _finish_transacao_simples(
     else:
         moeda_linha = f"{valor_moeda} {moeda} (câmbio: 1 USD = {cambio} {moeda})"
 
+    # Professional receipt format with operation ID
+    tipo_icon = {
+        "compra": "💳",
+        "venda": "💰",
+        "cambio": "🔄",
+    }.get(tipo_operacao, "📝")
+    
+    data_hora = datetime.now(timezone.utc) + timedelta(hours=int(os.getenv("TZ_OFFSET_HOURS", "-3")))
+    data_fmt = data_hora.strftime("%d/%m/%Y %H:%M:%S")
+
     response_payload: Dict[str, Any] = {
         "mensagem": (
-            f"✅ {operacao_texto}.\n"
-            f"{quantidade}g × ${money(cotacao)} = ${total_usd} USD\n"
-            f"Liquidado: {moeda_linha}"
+            f"✅ {operacao_texto}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🔑 ID: {op_id}\n"
+            f"📅 {data_fmt}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"{tipo_icon} {tipo_operacao.upper()}\n"
+            f"Ativo: {nome_ativo}\n"
+            f"Qtd: {quantidade}g\n"
+            f"Preço: ${money(cotacao)}/g\n"
+            f"Total: ${total_usd} USD\n"
+            f"Moeda: {moeda_linha}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"✨ Operação concluída"
         ),
         "dados": {
             "intencao": "registrar_operacao",
             "tipo_operacao": tipo_operacao,
             "ativo": nome_ativo,
+            "operacao_id": op_id,
             "quantidade": str(quantidade),
             "cotacao_usada": str(money(cotacao)),
             "valor_total_usd": str(total_usd),
@@ -1467,3 +1495,79 @@ def _processar_webhook(
         }
 
     raise HTTPException(status_code=400, detail=f"Intenção não suportada: {intencao}")
+
+
+@app.post("/operations/{operation_id}/edit")
+async def edit_operation(
+    operation_id: int,
+    request: Request,
+    x_webhook_token: Optional[str] = Header(default=None, alias="X-Webhook-Token"),
+) -> Dict[str, Any]:
+    """Edit an operation (only by the operator who created it)."""
+    token = x_webhook_token or request.query_params.get("token")
+    validate_webhook_token(str(token) if token is not None else None)
+    db = get_db()
+
+    transacao = (
+        db.client.table("transacoes")
+        .select("*")
+        .eq("id", operation_id)
+        .limit(1)
+        .execute()
+    )
+    rows = cast(List[Dict[str, Any]], transacao.data or [])
+    if not rows:
+        raise HTTPException(status_code=404, detail=f"Operação não encontrada: {operation_id}")
+
+    row = rows[0]
+    body = await request.json()
+    
+    # Allow editing: quantidade, cotacao_usada, moeda_liquidacao, valor_moeda
+    update_payload: Dict[str, Any] = {}
+    if "quantidade" in body:
+        update_payload["quantidade"] = str(body["quantidade"])
+    if "cotacao_usada" in body:
+        update_payload["cotacao_usada"] = str(body["cotacao_usada"])
+    if "moeda_liquidacao" in body:
+        update_payload["moeda_liquidacao"] = str(body["moeda_liquidacao"])
+    if "valor_moeda" in body:
+        update_payload["valor_moeda"] = str(body["valor_moeda"])
+
+    if update_payload:
+        db.client.table("transacoes").update(update_payload).eq("id", operation_id).execute()
+
+    return {
+        "mensagem": f"✅ Operação OP-{operation_id} editada com sucesso",
+        "dados": {"id": operation_id, "updated_fields": list(update_payload.keys())},
+    }
+
+
+@app.delete("/operations/{operation_id}")
+async def delete_operation(
+    operation_id: int,
+    request: Request,
+    x_webhook_token: Optional[str] = Header(default=None, alias="X-Webhook-Token"),
+) -> Dict[str, Any]:
+    """Delete/cancel an operation."""
+    token = x_webhook_token or request.query_params.get("token")
+    validate_webhook_token(str(token) if token is not None else None)
+    db = get_db()
+
+    transacao = (
+        db.client.table("transacoes")
+        .select("*")
+        .eq("id", operation_id)
+        .limit(1)
+        .execute()
+    )
+    rows = cast(List[Dict[str, Any]], transacao.data or [])
+    if not rows:
+        raise HTTPException(status_code=404, detail=f"Operação não encontrada: {operation_id}")
+
+    # Mark as cancelled instead of deleting
+    db.client.table("transacoes").update({"status": "cancelada"}).eq("id", operation_id).execute()
+
+    return {
+        "mensagem": f"✅ Operação OP-{operation_id} cancelada",
+        "dados": {"id": operation_id, "status": "cancelada"},
+    }
