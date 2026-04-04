@@ -135,6 +135,30 @@ def _compute_sale_profit_reference(
     }
 
 
+def _attach_sale_profit_reference(db: DatabaseClient, contexto: Dict[str, Any]) -> None:
+    if str(contexto.get("tipo_operacao", "")).lower() != "venda":
+        return
+
+    try:
+        peso = Decimal(str(contexto.get("peso", "0")))
+        total_pago = Decimal(str(contexto.get("total_pago_usd", "0")))
+    except (InvalidOperation, TypeError, ValueError):
+        return
+
+    if peso <= 0 or total_pago <= 0:
+        return
+
+    ativo = db.get_ativo_by_nome("Ouro")
+    if not ativo:
+        ativo = db.get_ativo_by_nome("Ouro 24k")
+    if not ativo:
+        return
+
+    profit_ref = _compute_sale_profit_reference(db, int(ativo["id"]), peso, total_pago)
+    if profit_ref:
+        contexto.update(profit_ref)
+
+
 def validate_webhook_token(token: Optional[str]) -> None:
     expected = os.getenv("WEBHOOK_TOKEN")
     if not expected:
@@ -1643,6 +1667,17 @@ def _format_resumo(contexto: Dict[str, Any]) -> str:
 
     tipo_operacao = str(contexto.get("tipo_operacao") or "")
     pessoa_label = "Vendedor" if tipo_operacao == "compra" else "Comprador"
+    lucro_ref_usd = contexto.get("lucro_ref_usd")
+    preco_compra_ref_usd = contexto.get("preco_compra_ref_usd")
+    lucro_linha = ""
+    observacoes_idx = "10"
+
+    if tipo_operacao == "venda" and lucro_ref_usd is not None:
+        lucro_linha = (
+            f"10) Lucro ref.: USD {lucro_ref_usd} "
+            f"(custo-base: USD {preco_compra_ref_usd}/g)\n"
+        )
+        observacoes_idx = "11"
 
     if tipo_operacao == "compra":
         return (
@@ -1672,7 +1707,8 @@ def _format_resumo(contexto: Dict[str, Any]) -> str:
         f"7) {pessoa_label}: {contexto.get('pessoa')}\n"
         f"8) Forma de pagamento: {contexto.get('forma_pagamento')}\n"
         f"9) Pagamentos por moeda:\n{linhas_pagamento_texto}\n"
-        f"10) Observações: {contexto.get('observacoes') or '(nenhuma)'}\n"
+        f"{lucro_linha}"
+        f"{observacoes_idx}) Observações: {contexto.get('observacoes') or '(nenhuma)'}\n"
         "════════════════════════════════\n"
         "Se estiver correto, responda: sim\n"
         "Para cancelar, responda: não"
@@ -2488,6 +2524,7 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
 
     if estado == "await_observacoes":
         contexto["observacoes"] = "" if _normalize_text(mensagem) in {"nenhuma", "nao", "não"} else mensagem.strip()
+        _attach_sale_profit_reference(db, contexto)
         resumo = _format_resumo(contexto)
         _save_session(db, remetente, "await_confirmacao", contexto)
         return {"mensagem": resumo, "dados": {"etapa": "await_confirmacao", "preview": contexto}}
@@ -2515,11 +2552,8 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
         diferenca = money(total - total_pago)
         risco_diferenca = abs(diferenca) >= _RISK_DIFF_LIMIT_USD
         tipo_operacao_confirm = str(contexto.get("tipo_operacao", "compra"))
-
         if tipo_operacao_confirm == "venda":
-            profit_ref = _compute_sale_profit_reference(db, ativo_id, peso, total_pago)
-            if profit_ref:
-                contexto.update(profit_ref)
+            _attach_sale_profit_reference(db, contexto)
 
         pagamentos = list(contexto.get("pagamentos", []))
         header_payload: Dict[str, Any] = {
