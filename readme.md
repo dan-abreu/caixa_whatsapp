@@ -141,9 +141,15 @@ Webhook principal:
 
 POST /webhook/whatsapp
 
-Header obrigatório:
+Autenticação aceita:
 
-X-Webhook-Token: valor igual ao WEBHOOK_TOKEN
+- Header X-Webhook-Token com valor igual ao WEBHOOK_TOKEN
+- Ou query string ?token=<WEBHOOK_TOKEN>
+
+Observação de produção:
+
+- Em Railway + Pipedream, mantenha o mesmo valor de WEBHOOK_TOKEN configurado na Railway e usado na URL ou header do passo HTTP do Pipedream.
+- Não grave o token real em arquivos versionados do repositório.
 
 Body JSON:
 
@@ -177,11 +183,23 @@ Fluxo B - Registrar operação (funcionário)
 - Remetente deve existir em usuarios e estar ativo
 - Exemplo de mensagem: Comprei 10g de ouro
 - IA extrai intenção, ativo e quantidade
-- Backend consulta taxa atual
-- Backend calcula total com Decimal
-- Backend grava em transacoes
+- Backend pergunta o preço por grama em USD
+- Backend pergunta a moeda da liquidação (USD, EUR, SRD ou BRL)
+- Se a moeda não for USD, backend pergunta o câmbio manual no formato: 1 USD = X moeda
+- Backend calcula total com Decimal e grava a operação com moeda_liquidacao, valor_moeda e cambio_para_usd
 - Operações com risco, peso alto, valor alto, venda ou câmbio podem disparar análise multiagente automática
 - Quando disparada, a resposta inclui dados.analise_multiagente com resumo, decisões, riscos e recomendações
+
+Exemplo do fluxo rápido no WhatsApp:
+
+- Usuário: comprei 5g
+- Bot: Qual o preço por grama em USD para essa compra de 5g?
+- Usuário: 65
+- Bot: Em qual moeda foi liquidado? USD / EUR / SRD / BRL
+- Usuário: SRD
+- Bot: Qual o câmbio? (1 USD = quantos SRD)
+- Usuário: 38
+- Bot: confirma a operação com total USD e total em SRD
 
 ## Simulação local de WhatsApp
 
@@ -203,6 +221,22 @@ curl -X POST "http://127.0.0.1:8000/webhook/whatsapp" \
   -H "X-Webhook-Token: seu-token" \
   -d "{\"remetente\":\"+59711111111\",\"mensagem\":\"Comprei 10g de ouro\"}"
 ```
+
+Exemplo em produção com Railway:
+
+```bash
+curl -X POST "https://SEU-APP.railway.app/webhook/whatsapp?token=seu-token" \
+  -H "Content-Type: application/json" \
+  -d "{\"remetente\":\"+59711111111\",\"mensagem\":\"extrato\"}"
+```
+
+Integração recomendada Twilio + Pipedream + Railway:
+
+- Twilio recebe a mensagem WhatsApp
+- Twilio chama o webhook do Pipedream
+- Pipedream envia POST para Railway em /webhook/whatsapp
+- Railway responde com JSON contendo campo mensagem
+- Pipedream envia esse texto de volta ao WhatsApp usando a API da Twilio
 
 Exemplo de retorno:
 
