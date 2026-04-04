@@ -964,8 +964,14 @@ async def whatsapp_webhook(
 ) -> Dict[str, Any]:
     provider_message_id = x_provider_message_id or x_twilio_message_sid
     raw_body: Any = {}
+    raw_text = ""
     body_data: Dict[str, Any] = {}
     payload: Optional[WhatsAppWebhookPayload] = None
+
+    try:
+        raw_text = (await request.body()).decode("utf-8", errors="ignore")
+    except Exception:
+        raw_text = ""
 
     try:
         raw_body = await request.json()
@@ -985,8 +991,7 @@ async def whatsapp_webhook(
     # Fallback parser for form-urlencoded when request.form() is unavailable.
     if not body_data:
         try:
-            raw = (await request.body()).decode("utf-8", errors="ignore")
-            parsed = parse_qs(raw)
+            parsed = parse_qs(raw_text)
             body_data = {k: v[0] for k, v in parsed.items() if v}
         except Exception:
             body_data = {}
@@ -1079,19 +1084,11 @@ async def whatsapp_webhook_twilio(
 ) -> Response:
     body_data: Dict[str, Any] = {}
     try:
-        form = await request.form()
-        body_data = dict(form)
+        raw = (await request.body()).decode("utf-8", errors="ignore")
+        parsed = parse_qs(raw)
+        body_data = {k: v[0] for k, v in parsed.items() if v}
     except Exception:
         body_data = {}
-
-    # Fallback parser for Twilio form-urlencoded payload.
-    if not body_data:
-        try:
-            raw = (await request.body()).decode("utf-8", errors="ignore")
-            parsed = parse_qs(raw)
-            body_data = {k: v[0] for k, v in parsed.items() if v}
-        except Exception:
-            body_data = {}
 
     token = x_webhook_token or request.query_params.get("token") or body_data.get("token")
     provider_message_id = (
