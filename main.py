@@ -326,8 +326,20 @@ def _is_help_menu_request(message: str) -> bool:
 
 def _is_greeting(message: str) -> bool:
     text = _normalize_text(message)
-    greetings = {"oi", "ola", "olá", "bom dia", "boa tarde", "boa noite", "hello", "hi"}
-    return text in greetings
+    # Remove punctuation and collapse spaces for robust matching.
+    compact = re.sub(r"[^a-z0-9\s]", " ", text)
+    compact = re.sub(r"\s+", " ", compact).strip()
+
+    # Accept common variants like: "oii", "olaaa", "ola!", "bom diaaa".
+    if re.match(r"^o+i+$", compact):
+        return True
+    if re.match(r"^o+l+a+$", compact):
+        return True
+    if compact.startswith("bom dia") or compact.startswith("boa tarde") or compact.startswith("boa noite"):
+        return True
+    if compact in {"hello", "hi", "hey"}:
+        return True
+    return False
 
 
 def _sanitize_nome(value: str) -> str:
