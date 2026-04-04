@@ -70,6 +70,7 @@ Importantes:
 - `TZ_OFFSET_HOURS` (default: `-3`)
 - `LOG_LEVEL` (default: `INFO`)
 - `MULTI_AGENT_AUTO_ENABLED` (default: `true`)
+- `GUIDED_SESSION_IDLE_MINUTES` (default: `5`) tempo para o bot perguntar se deve continuar a transação ou cancelar após inatividade
 
 Twilio debug control:
 
