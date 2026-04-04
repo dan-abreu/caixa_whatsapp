@@ -331,10 +331,14 @@ def _normalize_cambio_para_usd(moeda: str, cambio_informado: Decimal) -> Decimal
 
 
 def _guided_prompt_for_state(state: str, contexto: Dict[str, Any]) -> str:
+    if state == "await_origem":
+        return "Passo 0: local da operação (balcão ou fora)?"
     if state == "await_teor":
         return "Passo 1: qual o teor do ouro em %? Exemplo: 91,6"
     if state == "await_peso":
         return "Passo 2: quantas gramas? Exemplo: 2,5"
+    if state == "await_preco_moeda":
+        return "Passo 2.5: qual a moeda base da precificação? (USD, EUR, SRD ou BRL)"
     if state == "await_preco_usd":
         return "Passo 3: qual o preço por grama? Exemplo: 115 USD"
     if state == "await_preco_cambio":
@@ -380,8 +384,8 @@ def _guided_clear_from_step(contexto: Dict[str, Any], target_state: str) -> Dict
     fields_by_step: Dict[str, List[str]] = {
         "await_teor": ["teor"],
         "await_peso": ["peso"],
-        "await_preco_usd": ["preco_moeda", "preco_moeda_valor", "preco_usd", "cambio_preco_eur", "total_usd"],
-        "await_preco_cambio": ["cambio_preco_eur", "preco_usd", "total_usd"],
+        "await_preco_usd": ["preco_moeda", "preco_moeda_valor", "preco_usd", "cambio_preco_moeda", "total_usd"],
+        "await_preco_cambio": ["cambio_preco_moeda", "preco_usd", "total_usd"],
         "await_moedas": ["moedas", "moeda_index", "moeda_atual", "pagamentos", "total_pago_usd"],
         "await_valor_moeda": ["pagamentos", "total_pago_usd"],
         "await_cambio_moeda": ["pagamentos", "total_pago_usd"],
@@ -436,8 +440,13 @@ def _guided_try_back_command(
 
     # "voltar" simples = etapa anterior mais segura
     if text in {"voltar", "corrigir", "editar"}:
+        tipo_operacao = str(contexto.get("tipo_operacao", "compra"))
+        prev_pessoa = "await_moedas" if tipo_operacao == "compra" else "await_fechamento_tipo"
         previous_map: Dict[str, str] = {
+            "await_origem": "await_menu_tipo_operacao",
+            "await_teor": "await_origem",
             "await_peso": "await_teor",
+            "await_preco_moeda": "await_peso",
             "await_preco_usd": "await_peso",
             "await_preco_cambio": "await_preco_usd",
             "await_moedas": "await_preco_usd",
@@ -445,7 +454,7 @@ def _guided_try_back_command(
             "await_cambio_moeda": "await_valor_moeda",
             "await_fechamento_gramas": "await_moedas",
             "await_fechamento_tipo": "await_fechamento_gramas",
-            "await_pessoa": "await_fechamento_tipo",
+            "await_pessoa": prev_pessoa,
             "await_forma_pagamento": "await_pessoa",
             "await_observacoes": "await_forma_pagamento",
             "await_confirmacao": "await_observacoes",
@@ -461,7 +470,7 @@ def _guided_try_back_command(
     if not target_state:
         return {
             "mensagem": (
-                "Para corrigir sem cancelar, envie: 'voltar peso', 'voltar preço' ou 'voltar teor'."
+                "Para corrigir sem cancelar, envie: 'voltar', 'voltar peso', 'voltar preço' ou 'voltar teor'."
             ),
             "dados": {"etapa": estado},
         }
@@ -1383,6 +1392,15 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
     estado = str(session.get("estado", ""))
     contexto = dict(session.get("contexto", {}))
     text = _normalize_text(mensagem)
+
+    cancelable_states = _GUIDED_FLOW_STATES - {"await_menu_option", "await_menu_tipo_operacao", "await_nome_usuario"}
+
+    if estado in cancelable_states and text in {"cancelar", "cancela", "cancel", "nao", "não", "parar", "sair"}:
+        _clear_session(db, remetente)
+        return {
+            "mensagem": "Operação cancelada por você. Quando quiser recomeçar, envie: compra ou venda.",
+            "dados": {"intencao": "fluxo_guiado_cancelado", "acao": "cancelar"},
+        }
 
     if estado == "await_menu_option":
         menu_result = _handle_menu_option(remetente, mensagem, db)
