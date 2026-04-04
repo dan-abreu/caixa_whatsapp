@@ -364,6 +364,24 @@ def _is_greeting(message: str) -> bool:
     return False
 
 
+def _looks_like_new_operation_start(message: str) -> bool:
+    text = _normalize_text(message)
+    operation_tokens = [
+        "comprei",
+        "comprar",
+        "compra",
+        "vendi",
+        "vender",
+        "venda",
+        "cambio",
+        "cambio",
+        "troca",
+    ]
+    has_operation_word = any(token in text for token in operation_tokens)
+    has_asset_or_amount = ("ouro" in text) or bool(re.search(r"\d", text))
+    return has_operation_word and has_asset_or_amount
+
+
 def _sanitize_nome(value: str) -> str:
     cleaned = re.sub(r"\s+", " ", value).strip()
     return cleaned[:80]
@@ -1886,6 +1904,16 @@ def _processar_webhook(
             erro="Remetente não autorizado",
         )
         raise HTTPException(status_code=403, detail="Remetente não autorizado.")
+
+    session = _get_session(db, remetente)
+    if session:
+        estado = str(session.get("estado", ""))
+        if estado in _GUIDED_FLOW_STATES:
+            # If user sends a fresh operation sentence, reset stale flow and re-interpret.
+            if _looks_like_new_operation_start(mensagem):
+                _clear_session(db, remetente)
+            else:
+                return _process_guided_flow(remetente, mensagem, db, session)
 
     session = _get_session(db, remetente)
     if session:
