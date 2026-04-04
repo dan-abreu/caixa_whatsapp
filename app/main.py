@@ -6,6 +6,7 @@ from html import escape
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any, Dict, List, Optional, cast
+from typing import Any, Dict, List, Optional, Tuple, cast
 from urllib.parse import parse_qs
 
 from fastapi import FastAPI, Header, HTTPException, Request, Response
@@ -494,6 +495,46 @@ def _build_cambio_prompt(moeda: str) -> str:
     if moeda_up == "EUR":
         return "1 EUR = quantos USD?"
     return f"1 USD = quantos {moeda_up}?"
+
+
+# Strength ordering — stronger = lower number (numerator of the pair prompt).
+_MOEDA_STRENGTH: Dict[str, int] = {"EUR": 0, "USD": 1, "BRL": 2, "SRD": 3}
+
+
+def _build_pair_cambio_prompt(base: str, payment: str) -> str:
+    """Return the natural pair prompt: '1 STRONGER = quantos WEAKER?'"""
+    b, p = base.upper(), payment.upper()
+    if _MOEDA_STRENGTH.get(b, 5) <= _MOEDA_STRENGTH.get(p, 5):
+        return f"1 {b} = quantos {p}?"
+    return f"1 {p} = quantos {b}?"
+
+
+def _pair_rate_to_payment_per_usd(
+    base: str,
+    payment: str,
+    user_rate: Decimal,
+    db: "DatabaseClient",
+) -> Tuple[Optional[Decimal], Decimal, Optional[Decimal]]:
+    """Convert a direct B/P pair rate (direction per _build_pair_cambio_prompt) to
+    (payment_per_usd, pair_P_per_B, c_base_per_usd)."""
+    b, p = base.upper(), payment.upper()
+    if _MOEDA_STRENGTH.get(b, 5) <= _MOEDA_STRENGTH.get(p, 5):
+        pair_p_per_b = user_rate                          # prompt: "1 B = R P"
+    else:
+        pair_p_per_b = fx_rate(Decimal("1") / user_rate) if user_rate > 0 else Decimal("1")
+
+    # Primary: B/USD from DB -> pay_per_usd = P_per_B x B_per_USD
+    raw_base = db.get_last_cambio_para_usd(b)
+    if raw_base and Decimal(str(raw_base)) > 0:
+        c_base = Decimal(str(raw_base))
+        return fx_rate(pair_p_per_b * c_base), pair_p_per_b, c_base
+
+    # Fallback: P/USD directly from DB
+    raw_pay = db.get_last_cambio_para_usd(p)
+    if raw_pay and Decimal(str(raw_pay)) > 0:
+        return Decimal(str(raw_pay)), pair_p_per_b, None
+
+    return None, pair_p_per_b, None
 
 
 def _normalize_cambio_para_usd(moeda: str, cambio_informado: Decimal) -> Decimal:
@@ -1766,17 +1807,11 @@ def _advance_after_payment_exchange(
             preco_moeda = str(contexto.get("preco_moeda", "USD")).upper()
             if proxima_moeda != preco_moeda:
                 _save_session(db, remetente, "await_cambio_moeda_pre_valor", contexto)
-                if proxima_moeda == "USD" and preco_moeda != "USD":
-                    cambio_prompt = _build_cambio_prompt(preco_moeda)
-                    msg_cambio = f"Câmbio para USD: {cambio_prompt}"
-                else:
-                    cambio_prompt = _build_cambio_prompt(proxima_moeda)
-                    msg_cambio = f"Antes do valor em {proxima_moeda}, informe o câmbio: {cambio_prompt}"
+                cambio_prompt = _build_pair_cambio_prompt(preco_moeda, proxima_moeda)
                 return {
                     "mensagem": (
                         "Pagamento registrado.\n"
-                        "Ainda falta o câmbio da moeda-base para calcular o total em USD.\n"
-                        f"{msg_cambio}"
+                        f"Câmbio {preco_moeda}/{proxima_moeda}: {cambio_prompt}"
                     ),
                     "dados": {"etapa": "await_cambio_moeda_pre_valor"},
                 }
@@ -1810,16 +1845,11 @@ def _advance_after_payment_exchange(
         preco_moeda_adv = str(contexto.get("preco_moeda", "USD")).upper()
         if proxima_moeda != preco_moeda_adv:
             _save_session(db, remetente, "await_cambio_moeda_pre_valor", contexto)
-            if proxima_moeda == "USD" and preco_moeda_adv != "USD":
-                cambio_prompt = _build_cambio_prompt(preco_moeda_adv)
-                msg_cambio = f"Câmbio para USD: {cambio_prompt}"
-            else:
-                cambio_prompt = _build_cambio_prompt(proxima_moeda)
-                msg_cambio = f"Antes do valor em {proxima_moeda}, informe o câmbio: {cambio_prompt}"
+            cambio_prompt = _build_pair_cambio_prompt(preco_moeda_adv, proxima_moeda)
             return {
                 "mensagem": (
                     f"Pago até agora: {money(total_pago_parcial)} USD. Restante: {restante} USD.\n"
-                    f"{msg_cambio}"
+                    f"Câmbio {preco_moeda_adv}/{proxima_moeda}: {cambio_prompt}"
                 ),
                 "dados": {"etapa": "await_cambio_moeda_pre_valor"},
             }
@@ -2138,20 +2168,13 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
             total_txt = "Total da operação definido."
 
         primeira_moeda = str(moedas[0]).upper()
-        # Ask exchange rate whenever payment currency differs from the operation's base currency.
         if primeira_moeda != preco_moeda:
             _save_session(db, remetente, "await_cambio_moeda_pre_valor", contexto)
-            if primeira_moeda == "USD" and preco_moeda != "USD":
-                # e.g. EUR operation paid in USD: ask "1 EUR = quantos USD?"
-                cambio_prompt = _build_cambio_prompt(preco_moeda)
-                prompt_msg = f"Câmbio para USD: {cambio_prompt}"
-            else:
-                cambio_prompt = _build_cambio_prompt(primeira_moeda)
-                prompt_msg = f"Antes do valor em {primeira_moeda}, informe o câmbio: {cambio_prompt}"
+            cambio_prompt = _build_pair_cambio_prompt(preco_moeda, primeira_moeda)
             return {
                 "mensagem": (
                     f"{total_txt}\n"
-                    f"{prompt_msg}"
+                    f"Câmbio {preco_moeda}/{primeira_moeda}: {cambio_prompt}"
                 ),
                 "dados": {"etapa": "await_cambio_moeda_pre_valor"},
             }
@@ -2178,8 +2201,7 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
             return {"mensagem": "Quanto será pago em USD?", "dados": {"etapa": "await_valor_moeda"}}
 
         if moeda_atual == "USD" and preco_moeda_cp != "USD":
-            # USD payment in non-USD operation (e.g. EUR op).
-            # Operator entered "1 preco_moeda = X USD" — use preco_moeda normalizer.
+            # Non-USD base, USD payment: prompt was "1 B = R USD".
             cambio_normalizado = _normalize_cambio_para_usd(preco_moeda_cp, cambio)
             _try_set_total_usd_from_base_rate(contexto, cambio_normalizado)
             total_usd_novo = Decimal(str(contexto.get("total_usd", "0")))
@@ -2190,15 +2212,42 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
             elif total_moeda_cp > 0:
                 lines.append(f"Total da operação: {money(total_moeda_cp)} {preco_moeda_cp}.")
             lines.append("Quanto será pago em USD?")
-            # Do NOT set cambio_moeda_atual_pre — USD payment has cambio_para_usd = 1.
             _save_session(db, remetente, "await_valor_moeda", contexto)
             return {"mensagem": "\n".join(lines), "dados": {"etapa": "await_valor_moeda"}}
 
+        if preco_moeda_cp != "USD" and moeda_atual != "USD":
+            # Both non-USD (e.g. EUR base + SRD pay): prompt was the direct B/P pair.
+            pay_per_usd, pair_p_per_b, c_base = _pair_rate_to_payment_per_usd(
+                preco_moeda_cp, moeda_atual, cambio, db
+            )
+            total_moeda_base = Decimal(str(contexto.get("total_moeda", "0")))
+            total_in_payment = money(total_moeda_base * pair_p_per_b) if total_moeda_base > 0 else None
+            if _MOEDA_STRENGTH.get(preco_moeda_cp, 5) <= _MOEDA_STRENGTH.get(moeda_atual, 5):
+                rate_echo = f"1 {preco_moeda_cp} = {money(pair_p_per_b)} {moeda_atual}"
+            else:
+                inv = fx_rate(Decimal("1") / pair_p_per_b) if pair_p_per_b > 0 else Decimal("0")
+                rate_echo = f"1 {moeda_atual} = {money(inv)} {preco_moeda_cp}"
+            lines = [f"Câmbio: {rate_echo}."]
+            if total_in_payment and total_in_payment > 0:
+                lines.append(f"Total estimado: {money(total_in_payment)} {moeda_atual}.")
+            lines.append(f"Quanto será pago em {moeda_atual}?")
+            if pay_per_usd is not None:
+                contexto["cambio_moeda_atual_pre"] = str(pay_per_usd)
+                contexto["fx_auto_assumido"] = True
+            else:
+                contexto.pop("cambio_moeda_atual_pre", None)
+                contexto["fx_auto_assumido"] = True
+            if c_base is not None:
+                _try_set_total_usd_from_base_rate(contexto, c_base)
+            _save_session(db, remetente, "await_valor_moeda", contexto)
+            return {"mensagem": "\n".join(lines), "dados": {"etapa": "await_valor_moeda"}}
+
+        # USD base, non-USD payment: normalize to P_per_USD.
         cambio_normalizado = _normalize_cambio_para_usd(moeda_atual, cambio)
         contexto["cambio_moeda_atual_pre"] = str(cambio_normalizado)
         _save_session(db, remetente, "await_valor_moeda", contexto)
         return {
-            "mensagem": f"Câmbio registrado para {moeda_atual}. Quanto será pago em {moeda_atual}?",
+            "mensagem": f"Câmbio registrado. Quanto será pago em {moeda_atual}?",
             "dados": {"etapa": "await_valor_moeda"},
         }
 
