@@ -241,6 +241,7 @@ _MULTI_AGENT_AUTO_ENABLED = os.getenv("MULTI_AGENT_AUTO_ENABLED", "true").strip(
 _MULTI_AGENT_AUTO_MIN_USD = Decimal(os.getenv("MULTI_AGENT_AUTO_MIN_USD", "500"))
 _MULTI_AGENT_AUTO_MIN_WEIGHT_GRAMS = Decimal(os.getenv("MULTI_AGENT_AUTO_MIN_WEIGHT_GRAMS", "10"))
 _GUIDED_FLOW_STATES = {
+    "await_menu_option",
     "await_origem",
     "await_teor",
     "await_peso",
@@ -336,6 +337,61 @@ def _build_whatsapp_checklist_menu() -> str:
         "- Endpoint: DELETE /operations/{id}\n\n"
         "Diga o numero da opcao ou escreva sua solicitacao."
     )
+
+
+def _handle_menu_option(remetente: str, mensagem: str, db: DatabaseClient) -> Optional[Dict[str, Any]]:
+    option = _normalize_text(mensagem)
+    if option not in {"1", "2", "3", "4", "5"}:
+        return {
+            "mensagem": (
+                "Opcao invalida. Escolha um numero de 1 a 5.\n\n"
+                f"{_build_whatsapp_checklist_menu()}"
+            ),
+            "dados": {"etapa": "await_menu_option"},
+        }
+
+    if option == "1":
+        _clear_session(db, remetente)
+        return {
+            "mensagem": (
+                "Perfeito. Vamos registrar uma operacao.\n"
+                "Envie no formato: 'Comprei 2g de ouro a 105'."
+            ),
+            "dados": {"acao": "registrar_operacao"},
+        }
+
+    if option == "2":
+        _clear_session(db, remetente)
+        return {
+            "mensagem": "Certo. Para consultar agora, envie: caixa",
+            "dados": {"acao": "consultar_caixa"},
+        }
+
+    if option == "3":
+        _clear_session(db, remetente)
+        return {
+            "mensagem": "Atualizacao de taxa (admin): envie no formato 'Taxa USD 5.40'.",
+            "dados": {"acao": "atualizar_taxa"},
+        }
+
+    if option == "4":
+        _clear_session(db, remetente)
+        return {
+            "mensagem": (
+                "Edicao de operacao:\n"
+                "Use o endpoint POST /operations/{id}/edit com os campos que deseja alterar."
+            ),
+            "dados": {"acao": "editar_operacao"},
+        }
+
+    _clear_session(db, remetente)
+    return {
+        "mensagem": (
+            "Cancelamento de operacao:\n"
+            "Use o endpoint DELETE /operations/{id} para marcar como cancelada."
+        ),
+        "dados": {"acao": "cancelar_operacao"},
+    }
 
 
 def _save_session(db: DatabaseClient, remetente: str, estado: str, contexto: Dict[str, Any]) -> None:
@@ -534,6 +590,11 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
     estado = str(session.get("estado", ""))
     contexto = dict(session.get("contexto", {}))
     text = _normalize_text(mensagem)
+
+    if estado == "await_menu_option":
+        menu_result = _handle_menu_option(remetente, mensagem, db)
+        if menu_result is not None:
+            return menu_result
 
     if estado == "await_origem":
         if text not in {"balcao", "balcão", "fora"}:
@@ -1395,6 +1456,11 @@ def _processar_webhook(
     if intencao == "conversar":
         if _is_help_menu_request(mensagem):
             resposta = _build_whatsapp_checklist_menu()
+            db.save_conversation_session(
+                remetente=remetente,
+                estado="await_menu_option",
+                contexto={"origem": "menu"},
+            )
         else:
             resposta = ai_data.resposta or (
                 "Posso te ajudar com operacoes, extrato e taxas. "
