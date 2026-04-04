@@ -139,23 +139,36 @@ def healthcheck() -> Dict[str, str]:
 @app.get("/menu")
 def menu() -> Dict[str, Any]:
     return {
-        "titulo": "Menu facil",
+        "titulo": "Menu",
         "versao": "1.0.0",
         "funcionalidades": [
             {
                 "id": 1,
-                "nome": "Ver saldo (caixa)",
+                "nome": "Registrar compra ou venda",
+                "intencao": "registrar_operacao",
+                "descricao": "Registra operacao de ouro com passos guiados.",
+                "exemplos": [
+                    "Comprei 2g de ouro",
+                    "Vendi 3g de ouro",
+                    "Comprei 2g de ouro a 105"
+                ],
+                "resposta_esperada": "Retorna comprovante da operacao."
+            },
+            {
+                "id": 2,
+                "nome": "Consultar saldo",
                 "intencao": "consultar_relatorio",
                 "descricao": "Mostra saldo atual por moeda e total de ouro em estoque.",
                 "exemplos": [
                     "caixa",
                     "caixa eur",
-                    "caixa srd"
+                    "caixa srd",
+                    "caixa xau"
                 ],
                 "resposta_esperada": "Retorna saldos atuais."
             },
             {
-                "id": 6,
+                "id": 3,
                 "nome": "Extrato detalhado",
                 "intencao": "extrato",
                 "descricao": "Lista todas as operacoes do periodo com detalhes de cada lancamento.",
@@ -167,34 +180,22 @@ def menu() -> Dict[str, Any]:
                 "resposta_esperada": "Retorna extrato detalhado no estilo bancario."
             },
             {
-                "id": 2,
-                "nome": "Registrar compra ou venda",
-                "intencao": "registrar_operacao",
-                "descricao": "Registra operacao de ouro com passos simples.",
-                "exemplos": [
-                    "Comprei 2g de ouro",
-                    "Vendi 3g de ouro",
-                    "Comprei 2g de ouro a 105"
-                ],
-                "resposta_esperada": "Retorna comprovante da operacao."
-            },
-            {
-                "id": 3,
-                "nome": "Atualizar taxa (admin)",
+                "id": 4,
+                "nome": "Atualizar taxa",
                 "intencao": "atualizar_taxa",
                 "descricao": "Atualiza taxa de ouro ou moeda.",
                 "exemplos": [
-                    "Taxa ouro 70.50",
-                    "Taxa USD 5.30"
+                    "taxa ouro 105.00",
+                    "taxa usd 5.40"
                 ],
                 "resposta_esperada": "Confirma nova taxa.",
                 "restricoes": "Somente admin"
             },
             {
-                "id": 4,
+                "id": 5,
                 "nome": "Editar operacao",
                 "intencao": "editar_operacao",
-                "descricao": "Altera preco, quantidade, moeda, valor_moeda ou cambio.",
+                "descricao": "Altera preco, quantidade, moeda, valor_moeda ou cambio de uma operacao existente.",
                 "exemplos": [
                     "editar 123 preco 110",
                     "editar 123 quantidade 2.5"
@@ -202,7 +203,7 @@ def menu() -> Dict[str, Any]:
                 "resposta_esperada": "Confirma o que foi alterado."
             },
             {
-                "id": 5,
+                "id": 6,
                 "nome": "Cancelar operacao",
                 "intencao": "cancelar_operacao",
                 "descricao": "Marca a operacao como cancelada.",
@@ -742,19 +743,22 @@ def _needs_name_onboarding(usuario: Dict[str, Any]) -> bool:
 
 def _build_whatsapp_checklist_menu() -> str:
     return (
-        "MENU FACIL\n"
-        "1) Registrar compra/venda de ouro\n"
+        "MENU\n"
+        "──────────────────\n"
+        "1) Registrar compra ou venda\n"
         "   Ex: Comprei 2g de ouro a 105\n\n"
-        "2) Ver saldo\n"
-        "   Ex: caixa | caixa eur | caixa srd\n\n"
-        "3) Atualizar taxa (admin)\n"
-        "   Ex: taxa usd 5.40\n\n"
-        "4) Editar operacao\n"
-        "   Ex: editar 123 preco 110\n\n"
-        "5) Cancelar operacao\n"
-        "   Ex: cancelar 123\n\n"
-        "Dica: para extrato detalhado, envie: extrato\n\n"
-        "Responda com 1, 2, 3, 4 ou 5."
+        "2) Consultar saldo\n"
+        "   Ex: caixa | caixa eur | caixa srd | caixa xau\n\n"
+        "3) Extrato detalhado\n"
+        "   Ex: extrato | extrato hoje | extrato semana\n\n"
+        "4) Atualizar taxa\n"
+        "   Ex: taxa usd 5.40 | taxa ouro 105\n\n"
+        "5) Editar operacao\n"
+        "   Ex: editar 123 preco 110 | editar 123 quantidade 2.5\n\n"
+        "6) Cancelar operacao\n"
+        "   Ex: cancelar 123\n"
+        "──────────────────\n"
+        "Responda com 1 a 6."
     )
 
 
@@ -994,10 +998,10 @@ def _build_extrato_response(
 
 def _handle_menu_option(remetente: str, mensagem: str, db: DatabaseClient) -> Optional[Dict[str, Any]]:
     option = _normalize_text(mensagem)
-    if option not in {"1", "2", "3", "4", "5"}:
+    if option not in {"1", "2", "3", "4", "5", "6"}:
         return {
             "mensagem": (
-                "Opcao invalida. Escolha um numero de 1 a 5.\n\n"
+                "Opcao invalida. Escolha um numero de 1 a 6.\n\n"
                 f"{_build_whatsapp_checklist_menu()}"
             ),
             "dados": {"etapa": "await_menu_option"},
@@ -1012,7 +1016,7 @@ def _handle_menu_option(remetente: str, mensagem: str, db: DatabaseClient) -> Op
         )
         return {
             "mensagem": (
-                "Perfeito. Vamos registrar uma operacao.\n"
+                "Registrar operacao.\n"
                 "Informe o tipo: compra ou venda."
             ),
             "dados": {"acao": "registrar_operacao"},
@@ -1023,6 +1027,19 @@ def _handle_menu_option(remetente: str, mensagem: str, db: DatabaseClient) -> Op
         return _build_caixa_response(db)
 
     if option == "3":
+        _clear_session(db, remetente)
+        _save_session(db, remetente, "await_extrato_periodo", {})
+        return {
+            "mensagem": (
+                "EXTRATO - selecione o periodo:\n"
+                "1) Hoje\n"
+                "2) Esta semana\n"
+                "3) Informar datas"
+            ),
+            "dados": {"etapa": "await_extrato_periodo"},
+        }
+
+    if option == "4":
         _clear_session(db, remetente)
         usuario = db.get_usuario_by_telefone(remetente)
         if not usuario or usuario.get("tipo_usuario") != "admin":
@@ -1035,20 +1052,19 @@ def _handle_menu_option(remetente: str, mensagem: str, db: DatabaseClient) -> Op
             }
         return {
             "mensagem": (
-                "Atualizacao de taxa liberada.\n"
-                "Envie no formato: Taxa USD 5.40\n"
-                "Ou: Taxa Ouro 105.00"
+                "Atualizacao de taxa.\n"
+                "Formato: taxa USD 5.40 | taxa ouro 105.00"
             ),
             "dados": {"acao": "atualizar_taxa", "permitido": True},
         }
 
-    if option == "4":
+    if option == "5":
         _clear_session(db, remetente)
         return {
             "mensagem": (
-                "Editar operacao (simples):\n"
-                "1) Informe o ID da operacao\n"
-                "2) Informe o campo e o novo valor\n\n"
+                "Editar operacao.\n"
+                "Formato: editar ID campo valor\n\n"
+                "Campos: preco | quantidade | moeda | valor_moeda | cambio\n"
                 "Exemplos:\n"
                 "- editar 123 preco 110\n"
                 "- editar 123 quantidade 2.5"
@@ -1059,10 +1075,9 @@ def _handle_menu_option(remetente: str, mensagem: str, db: DatabaseClient) -> Op
     _clear_session(db, remetente)
     return {
         "mensagem": (
-            "Cancelar operacao (simples):\n"
-            "- Envie: cancelar ID\n"
-            "Exemplo: cancelar 123\n\n"
-            "A operacao sera marcada como cancelada."
+            "Cancelar operacao.\n"
+            "Formato: cancelar ID\n"
+            "Exemplo: cancelar 123"
         ),
         "dados": {"acao": "cancelar_operacao"},
     }
