@@ -237,6 +237,7 @@ _SESSION_CACHE: Dict[str, Dict[str, Any]] = {}
 
 _MOEDAS_SUPORTADAS = ["USD", "SRD", "EUR", "BRL"]
 _RISK_DIFF_LIMIT_USD = Decimal(os.getenv("RISK_DIFF_LIMIT_USD", "250"))
+_GUIDED_SESSION_IDLE_MINUTES = int(os.getenv("GUIDED_SESSION_IDLE_MINUTES", "5"))
 _MULTI_AGENT_AUTO_ENABLED = os.getenv("MULTI_AGENT_AUTO_ENABLED", "true").strip().lower() not in {"0", "false", "no"}
 _MULTI_AGENT_AUTO_MIN_USD = Decimal(os.getenv("MULTI_AGENT_AUTO_MIN_USD", "500"))
 _MULTI_AGENT_AUTO_MIN_WEIGHT_GRAMS = Decimal(os.getenv("MULTI_AGENT_AUTO_MIN_WEIGHT_GRAMS", "10"))
@@ -259,6 +260,7 @@ _GUIDED_FLOW_STATES = {
     "await_forma_pagamento",
     "await_observacoes",
     "await_confirmacao",
+    "await_resume_confirmacao",
     "await_preco_simples",
     "await_moeda_simples",
     "await_cambio_simples",
@@ -1080,7 +1082,8 @@ def _handle_menu_option(remetente: str, mensagem: str, db: DatabaseClient) -> Op
 
 
 def _save_session(db: DatabaseClient, remetente: str, estado: str, contexto: Dict[str, Any]) -> None:
-    _SESSION_CACHE[remetente] = {"estado": estado, "contexto": contexto}
+    atualizado_em = datetime.now(timezone.utc).isoformat()
+    _SESSION_CACHE[remetente] = {"estado": estado, "contexto": contexto, "atualizado_em": atualizado_em}
     db.save_conversation_session(remetente=remetente, estado=estado, contexto=contexto)
 
 
@@ -1090,10 +1093,36 @@ def _get_session(db: DatabaseClient, remetente: str) -> Optional[Dict[str, Any]]
         return cached
     db_session = db.get_conversation_session(remetente)
     if db_session and isinstance(db_session.get("contexto"), dict):
-        session = {"estado": db_session.get("estado", ""), "contexto": db_session["contexto"]}
+        session = {
+            "estado": db_session.get("estado", ""),
+            "contexto": db_session["contexto"],
+            "atualizado_em": db_session.get("atualizado_em"),
+        }
         _SESSION_CACHE[remetente] = session
         return session
     return None
+
+
+def _guided_session_idle_minutes(session: Dict[str, Any]) -> Optional[int]:
+    updated_raw = session.get("atualizado_em")
+    if not updated_raw:
+        return None
+    try:
+        updated_dt = datetime.fromisoformat(str(updated_raw).replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if updated_dt.tzinfo is None:
+        updated_dt = updated_dt.replace(tzinfo=timezone.utc)
+    now_utc = datetime.now(timezone.utc)
+    delta = now_utc - updated_dt.astimezone(timezone.utc)
+    return max(0, int(delta.total_seconds() // 60))
+
+
+def _is_guided_session_stale(session: Dict[str, Any]) -> bool:
+    idle = _guided_session_idle_minutes(session)
+    if idle is None:
+        return False
+    return idle >= _GUIDED_SESSION_IDLE_MINUTES
 
 
 def _clear_session(db: DatabaseClient, remetente: str) -> None:
@@ -1410,6 +1439,43 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
     back_result = _guided_try_back_command(remetente, mensagem, estado, contexto, db)
     if back_result is not None and estado in _GUIDED_FLOW_STATES:
         return back_result
+
+    if estado == "await_resume_confirmacao":
+        if text in {"continuar", "retomar", "sim", "s"}:
+            estado_anterior = str(contexto.get("estado_anterior", ""))
+            contexto_anterior = dict(contexto.get("contexto_anterior", {}))
+            if not estado_anterior or estado_anterior not in _GUIDED_FLOW_STATES:
+                _clear_session(db, remetente)
+                return {
+                    "mensagem": "Sessão anterior expirada. Envie 'compra' ou 'venda' para iniciar novamente.",
+                    "dados": {"acao": "sessao_expirada"},
+                }
+
+            _save_session(db, remetente, estado_anterior, contexto_anterior)
+            if estado_anterior == "await_confirmacao":
+                resumo = _format_resumo(contexto_anterior)
+                return {
+                    "mensagem": f"Retomando de onde parou.\n{resumo}",
+                    "dados": {"etapa": estado_anterior, "acao": "retomar_fluxo"},
+                }
+
+            prompt = _guided_prompt_for_state(estado_anterior, contexto_anterior)
+            return {
+                "mensagem": f"Retomando de onde parou.\n{prompt}",
+                "dados": {"etapa": estado_anterior, "acao": "retomar_fluxo"},
+            }
+
+        if text in {"cancelar", "cancela", "cancel", "nao", "não", "n", "parar", "sair"}:
+            _clear_session(db, remetente)
+            return {
+                "mensagem": "Operação cancelada por você. Quando quiser recomeçar, envie: compra ou venda.",
+                "dados": {"intencao": "fluxo_guiado_cancelado", "acao": "cancelar"},
+            }
+
+        return {
+            "mensagem": "Deseja continuar a transação de onde parou? Responda: continuar ou cancelar.",
+            "dados": {"etapa": "await_resume_confirmacao"},
+        }
 
     if estado == "await_nome_usuario":
         nome = _sanitize_nome(mensagem)
@@ -2414,6 +2480,7 @@ def _processar_webhook(
     mensagem = payload.mensagem.strip()
     raw_ai_data: Dict[str, Any] = {}
     usuario = db.get_usuario_by_telefone(remetente)
+    mensagem_norm = _normalize_text(mensagem)
 
     if not usuario:
         db.insert_log(
@@ -2428,6 +2495,34 @@ def _processar_webhook(
     if session:
         estado = str(session.get("estado", ""))
         if estado in _GUIDED_FLOW_STATES:
+            if estado != "await_resume_confirmacao" and _is_guided_session_stale(session):
+                if mensagem_norm in {"cancelar", "cancela", "cancel", "nao", "não", "n", "parar", "sair"}:
+                    _clear_session(db, remetente)
+                    return {
+                        "mensagem": "Operação cancelada por você. Quando quiser recomeçar, envie: compra ou venda.",
+                        "dados": {"intencao": "fluxo_guiado_cancelado", "acao": "cancelar"},
+                    }
+
+                idle_min = _guided_session_idle_minutes(session) or _GUIDED_SESSION_IDLE_MINUTES
+                contexto_atual = dict(session.get("contexto", {}))
+                _save_session(
+                    db,
+                    remetente,
+                    "await_resume_confirmacao",
+                    {
+                        "estado_anterior": estado,
+                        "contexto_anterior": contexto_atual,
+                    },
+                )
+                return {
+                    "mensagem": (
+                        f"Ficamos {idle_min} minutos sem mensagens. "
+                        "Deseja continuar a transação de onde parou? "
+                        "Responda: continuar ou cancelar."
+                    ),
+                    "dados": {"etapa": "await_resume_confirmacao", "idle_minutos": idle_min},
+                }
+
             # If user sends a fresh operation sentence, reset stale flow and re-interpret.
             if _looks_like_new_operation_start(mensagem):
                 _clear_session(db, remetente)
