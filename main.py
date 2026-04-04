@@ -1418,17 +1418,37 @@ def _processar_webhook(
             raise HTTPException(status_code=400, detail="Quantidade deve ser maior que zero.")
 
         tipo_operacao = infer_tipo_operacao(mensagem)
+        valor_informado = ai_data.valor_informado
 
+        contexto = {
+            "ativo_id": ativo_id,
+            "nome_ativo": ativo["nome"],
+            "quantidade": str(quantidade),
+            "tipo_operacao": tipo_operacao,
+            "source_message_id": provider_message_id,
+        }
+
+        # Se o preço já foi informado, pula direto para perguntar moeda
+        if valor_informado is not None and valor_informado > 0:
+            cotacao = parse_decimal(valor_informado, "valor_informado")
+            total_usd = money(quantidade * cotacao)
+            contexto["cotacao_usd"] = str(cotacao)
+            contexto["total_usd"] = str(total_usd)
+            db.save_conversation_session(
+                remetente=remetente,
+                estado="await_moeda_simples",
+                contexto=contexto,
+            )
+            return {
+                "mensagem": f"Em qual moeda foi liquidado?\nUSD / EUR / SRD / BRL",
+                "dados": {"etapa": "await_moeda_simples"},
+            }
+
+        # Senão, pede o preço
         db.save_conversation_session(
             remetente=remetente,
             estado="await_preco_simples",
-            contexto={
-                "ativo_id": ativo_id,
-                "nome_ativo": ativo["nome"],
-                "quantidade": str(quantidade),
-                "tipo_operacao": tipo_operacao,
-                "source_message_id": provider_message_id,
-            },
+            contexto=contexto,
         )
 
         operacao_texto = {

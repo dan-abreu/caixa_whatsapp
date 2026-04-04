@@ -26,12 +26,12 @@ Se a mensagem for sobre atualizar a taxa de um ativo (ex: "Taxa ouro 68.50"):
   "resposta": null
 }
 
-Se a mensagem for sobre registrar uma operação de compra, venda ou câmbio (ex: "Comprei 2g de ouro"):
+Se a mensagem for sobre registrar uma operação de compra, venda ou câmbio (ex: "Comprei 2g de ouro a 105", "Vendi 3g ouro a 70 USD"):
 {
   "intencao": "registrar_operacao",
   "ativo": "string",
   "quantidade": float,
-  "valor_informado": null,
+  "valor_informado": float ou null (se houver preço/taxa informado, ex: "a 105 euros", "a 5.30")
   "resposta": null
 }
 
