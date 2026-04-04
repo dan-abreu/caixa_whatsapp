@@ -251,6 +251,7 @@ _GUIDED_FLOW_STATES = {
     "await_preco_moeda",
     "await_preco_usd",
     "await_preco_cambio",
+    "await_cambio_base_para_total",
     "await_moedas",
     "await_valor_moeda",
     "await_cambio_moeda",
@@ -332,6 +333,27 @@ def _normalize_cambio_para_usd(moeda: str, cambio_informado: Decimal) -> Decimal
     return fx_rate(cambio_informado)
 
 
+def _try_set_total_usd_from_base_rate(contexto: Dict[str, Any], cambio_base_para_usd: Decimal) -> bool:
+    """Set preco_usd/total_usd when the base-pricing currency exchange rate becomes available."""
+    preco_moeda = str(contexto.get("preco_moeda", "USD")).upper()
+    if preco_moeda == "USD":
+        return bool(contexto.get("total_usd"))
+
+    preco_moeda_valor_raw = contexto.get("preco_moeda_valor")
+    peso_raw = contexto.get("peso")
+    if preco_moeda_valor_raw is None or peso_raw is None:
+        return False
+
+    preco_moeda_valor = Decimal(str(preco_moeda_valor_raw))
+    peso = Decimal(str(peso_raw))
+    preco_usd = money(preco_moeda_valor / cambio_base_para_usd)
+    total_usd = money(preco_usd * peso)
+    contexto["cambio_preco_moeda"] = str(fx_rate(cambio_base_para_usd))
+    contexto["preco_usd"] = str(preco_usd)
+    contexto["total_usd"] = str(total_usd)
+    return True
+
+
 def _guided_prompt_for_state(state: str, contexto: Dict[str, Any]) -> str:
     if state == "await_origem":
         return "Passo 0: local da operação (balcão ou fora)?"
@@ -346,6 +368,9 @@ def _guided_prompt_for_state(state: str, contexto: Dict[str, Any]) -> str:
     if state == "await_preco_cambio":
         moeda_preco = str(contexto.get("preco_moeda") or "EUR").upper()
         return f"Passo 4: informe o câmbio. Exemplo: {_build_cambio_prompt(moeda_preco)}"
+    if state == "await_cambio_base_para_total":
+        moeda_preco = str(contexto.get("preco_moeda") or "EUR").upper()
+        return f"Passo 4.5: para fechar o total em USD, informe o câmbio da moeda-base ({_build_cambio_prompt(moeda_preco)})"
     if state == "await_moedas":
         return "Passo 5: em quais moedas foi pago? Use: USD, EUR, SRD, BRL"
     if state == "await_valor_moeda":
@@ -374,6 +399,7 @@ def _guided_clear_from_step(contexto: Dict[str, Any], target_state: str) -> Dict
         "await_peso",
         "await_preco_usd",
         "await_preco_cambio",
+        "await_cambio_base_para_total",
         "await_moedas",
         "await_valor_moeda",
         "await_cambio_moeda",
@@ -386,8 +412,9 @@ def _guided_clear_from_step(contexto: Dict[str, Any], target_state: str) -> Dict
     fields_by_step: Dict[str, List[str]] = {
         "await_teor": ["teor"],
         "await_peso": ["peso"],
-        "await_preco_usd": ["preco_moeda", "preco_moeda_valor", "preco_usd", "cambio_preco_moeda", "total_usd"],
+        "await_preco_usd": ["preco_moeda", "preco_moeda_valor", "total_moeda", "preco_usd", "cambio_preco_moeda", "total_usd"],
         "await_preco_cambio": ["cambio_preco_moeda", "preco_usd", "total_usd"],
+        "await_cambio_base_para_total": ["cambio_preco_moeda", "preco_usd", "total_usd"],
         "await_moedas": ["moedas", "moeda_index", "moeda_atual", "pagamentos", "total_pago_usd"],
         "await_valor_moeda": ["pagamentos", "total_pago_usd"],
         "await_cambio_moeda": ["pagamentos", "total_pago_usd"],
@@ -427,6 +454,7 @@ def _guided_try_back_command(
         "preco usd": "await_preco_usd",
         "cotacao": "await_preco_usd",
         "cambio preco": "await_preco_cambio",
+        "cambio base": "await_cambio_base_para_total",
         "moedas": "await_moedas",
         "moeda": "await_moedas",
         "pagamento": "await_valor_moeda",
@@ -451,6 +479,7 @@ def _guided_try_back_command(
             "await_preco_moeda": "await_peso",
             "await_preco_usd": "await_peso",
             "await_preco_cambio": "await_preco_usd",
+            "await_cambio_base_para_total": "await_moedas",
             "await_moedas": "await_preco_usd",
             "await_valor_moeda": "await_moedas",
             "await_cambio_moeda": "await_valor_moeda",
@@ -1374,6 +1403,33 @@ def _advance_after_payment_exchange(
     idx = int(contexto.get("moeda_index", 0)) + 1
     total_operacao = Decimal(str(contexto.get("total_usd", "0")))
     total_pago_parcial = sum((Decimal(str(p["valor_usd"])) for p in pagamentos), Decimal("0"))
+
+    # Se ainda não temos total em USD (precificação em moeda não-USD sem câmbio-base),
+    # avançamos sem calcular restante e pedimos o câmbio-base no final.
+    if total_operacao <= 0:
+        if idx < len(moedas):
+            contexto["moeda_index"] = idx
+            contexto["moeda_atual"] = moedas[idx]
+            _save_session(db, remetente, "await_valor_moeda", contexto)
+            return {
+                "mensagem": (
+                    "Pagamento registrado.\n"
+                    "Ainda falta o câmbio da moeda-base para calcular o total em USD.\n"
+                    f"Valor em {moedas[idx]}?"
+                ),
+                "dados": {"etapa": "await_valor_moeda"},
+            }
+
+        _save_session(db, remetente, "await_cambio_base_para_total", contexto)
+        moeda_preco = str(contexto.get("preco_moeda", "EUR")).upper()
+        return {
+            "mensagem": (
+                "Para fechar o total da operação em USD, informe o câmbio da moeda-base.\n"
+                f"{_build_cambio_prompt(moeda_preco)}"
+            ),
+            "dados": {"etapa": "await_cambio_base_para_total"},
+        }
+
     restante = money(total_operacao - total_pago_parcial)
 
     if idx < len(moedas):
@@ -1424,7 +1480,7 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
 
     cancelable_states = _GUIDED_FLOW_STATES - {"await_menu_option", "await_menu_tipo_operacao", "await_nome_usuario"}
 
-    if estado in cancelable_states and text in {"cancelar", "cancela", "cancel", "nao", "não", "parar", "sair"}:
+    if estado in cancelable_states and text in {"cancelar", "cancela", "cancel", "parar", "sair"}:
         _clear_session(db, remetente)
         return {
             "mensagem": "Operação cancelada por você. Quando quiser recomeçar, envie: compra ou venda.",
@@ -1568,13 +1624,18 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
         preco_moeda = str(contexto.get("preco_moeda", "USD")).upper()
         if preco_moeda != "USD":
             contexto["preco_moeda_valor"] = str(money(preco))
-            _save_session(db, remetente, "await_preco_cambio", contexto)
+            peso = Decimal(str(contexto.get("peso")))
+            total_moeda = money(peso * preco)
+            contexto["total_moeda"] = str(total_moeda)
+            _save_session(db, remetente, "await_moedas", contexto)
             return {
                 "mensagem": (
                     f"Preco recebido: {money(preco)} {preco_moeda}/g.\n"
-                    f"Agora informe o cambio: {_build_cambio_prompt(preco_moeda)}"
+                    f"Total da operação: {total_moeda} {preco_moeda}.\n"
+                    "Informe as moedas de pagamento: USD, EUR, SRD, BRL\n"
+                    "(o câmbio será pedido na etapa de pagamento)"
                 ),
-                "dados": {"etapa": "await_preco_cambio"},
+                "dados": {"etapa": "await_moedas"},
             }
 
         peso = Decimal(str(contexto.get("peso")))
@@ -1625,9 +1686,19 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
         contexto["moeda_atual"] = moedas[0]
         _save_session(db, remetente, "await_valor_moeda", contexto)
         total_operacao = Decimal(str(contexto.get("total_usd", "0")))
+        preco_moeda = str(contexto.get("preco_moeda", "USD")).upper()
+        total_moeda = Decimal(str(contexto.get("total_moeda", "0")))
+
+        if total_operacao > 0:
+            total_txt = f"Total da operação: {money(total_operacao)} USD."
+        elif preco_moeda != "USD" and total_moeda > 0:
+            total_txt = f"Total da operação: {money(total_moeda)} {preco_moeda}."
+        else:
+            total_txt = "Total da operação definido."
+
         return {
             "mensagem": (
-                f"Total da operação: {money(total_operacao)} USD.\n"
+                f"{total_txt}\n"
                 f"Quanto será pago em {moedas[0]}?"
             ),
             "dados": {"etapa": "await_valor_moeda"},
@@ -1649,28 +1720,17 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
         pagamentos.append(pagamento)
         contexto["pagamentos"] = pagamentos
 
-        total_operacao = Decimal(str(contexto.get("total_usd", "0")))
-
         if moeda_atual == "USD":
             return _advance_after_payment_exchange(db, remetente, contexto, pagamentos)
 
-        # Se a moeda de pagamento é a mesma usada na precificação, reutiliza o câmbio já informado
-        preco_moeda_ctx = str(contexto.get("preco_moeda", "")).upper()
-        cambio_preco_ctx = contexto.get("cambio_preco_moeda")
-        if moeda_atual == preco_moeda_ctx and cambio_preco_ctx:
-            cambio_aplicado = Decimal(str(cambio_preco_ctx))
-            valor_usd_pag = money(valor_moeda / cambio_aplicado)
-            pagamentos[-1]["cambio_para_usd"] = str(money(cambio_aplicado))
-            pagamentos[-1]["valor_usd"] = str(valor_usd_pag)
-            contexto["pagamentos"] = pagamentos
-            return _advance_after_payment_exchange(db, remetente, contexto, pagamentos)
-
-        # Moeda diferente: precisa perguntar o câmbio
+        # Câmbio de moeda não-USD sempre é pedido na etapa de pagamento.
+        total_operacao = Decimal(str(contexto.get("total_usd", "0")))
         _save_session(db, remetente, "await_cambio_moeda", contexto)
+        total_linha = f"Total da operação: {money(total_operacao)} USD.\n" if total_operacao > 0 else ""
         return {
             "mensagem": (
                 f"{moeda_atual}: {money(valor_moeda)} registrado.\n"
-                f"Total da operação: {money(total_operacao)} USD.\n"
+                f"{total_linha}"
                 f"Câmbio do {moeda_atual}: {_build_cambio_prompt(moeda_atual)}"
             ),
             "dados": {"etapa": "await_cambio_moeda"},
@@ -1695,6 +1755,28 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
         pagamentos[-1] = ultimo
         contexto["pagamentos"] = pagamentos
 
+        # Se esta moeda for a base da precificação, usamos o câmbio para fechar total em USD automaticamente.
+        preco_moeda = str(contexto.get("preco_moeda", "USD")).upper()
+        if preco_moeda != "USD" and moeda_ult == preco_moeda:
+            _try_set_total_usd_from_base_rate(contexto, cambio_normalizado)
+
+        return _advance_after_payment_exchange(db, remetente, contexto, pagamentos)
+
+    if estado == "await_cambio_base_para_total":
+        cambio = _parse_decimal_from_text(mensagem, "cambio_base_total")
+        if cambio <= 0:
+            return {"mensagem": "Câmbio deve ser maior que zero.", "dados": {"etapa": estado}}
+
+        preco_moeda = str(contexto.get("preco_moeda", "USD")).upper()
+        cambio_normalizado = _normalize_cambio_para_usd(preco_moeda, cambio)
+        if not _try_set_total_usd_from_base_rate(contexto, cambio_normalizado):
+            _clear_session(db, remetente)
+            return {
+                "mensagem": "Não consegui retomar os dados da operação. Envie compra ou venda para reiniciar.",
+                "dados": {"acao": "reiniciar"},
+            }
+
+        pagamentos = list(contexto.get("pagamentos", []))
         return _advance_after_payment_exchange(db, remetente, contexto, pagamentos)
 
     if estado == "await_fechamento_gramas":
@@ -2496,7 +2578,7 @@ def _processar_webhook(
         estado = str(session.get("estado", ""))
         if estado in _GUIDED_FLOW_STATES:
             if estado != "await_resume_confirmacao" and _is_guided_session_stale(session):
-                if mensagem_norm in {"cancelar", "cancela", "cancel", "nao", "não", "n", "parar", "sair"}:
+                if mensagem_norm in {"cancelar", "cancela", "cancel", "parar", "sair"}:
                     _clear_session(db, remetente)
                     return {
                         "mensagem": "Operação cancelada por você. Quando quiser recomeçar, envie: compra ou venda.",
