@@ -218,13 +218,13 @@ def menu() -> Dict[str, Any]:
 
 
 _ERROS_AMIGAVEIS: Dict[int, str] = {
-    400: "Nao entendi. Tente assim: Comprei 2g de ouro a 105",
-    401: "Acesso negado. Token invalido.",
-    403: "Voce nao tem permissao para isso.",
-    404: "Recurso nao encontrado. Digite 'menu' para ver as opcoes.",
+    400: "Não entendi. Tente assim: Comprei 2g de ouro a 105",
+    401: "Acesso negado. Token inválido.",
+    403: "Você não tem permissão para isso.",
+    404: "Recurso não encontrado. Digite 'menu' para ver as opções.",
     422: "Dados incompletos. Tente com uma mensagem mais objetiva.",
     500: "Erro interno. Tente novamente em alguns segundos.",
-    502: "O servico de IA nao respondeu. Tente novamente.",
+    502: "O serviço de IA não respondeu. Tente novamente.",
 }
 
 # Fallback de idempotência para ambiente sem migração aplicada.
@@ -312,31 +312,31 @@ def _extract_moedas(value: str) -> List[str]:
 
 def _guided_prompt_for_state(state: str, contexto: Dict[str, Any]) -> str:
     if state == "await_teor":
-        return "Passo 1: qual o teor do ouro em %? Exemplo: 91.6"
+        return "Passo 1: qual o teor do ouro em %? Exemplo: 91,6"
     if state == "await_peso":
-        return "Passo 2: quantas gramas? Exemplo: 2.5"
+        return "Passo 2: quantas gramas? Exemplo: 2,5"
     if state == "await_preco_usd":
-        return "Passo 3: qual o preco por grama? Exemplo: 115 USD"
+        return "Passo 3: qual o preço por grama? Exemplo: 115 USD"
     if state == "await_preco_cambio":
-        return "Passo 4: informe o cambio. Exemplo: 1 USD = 0.92 EUR"
+        return "Passo 4: informe o câmbio. Exemplo: 1 USD = 0,92 EUR"
     if state == "await_moedas":
         return "Passo 5: em quais moedas foi pago? Use: USD, EUR, SRD, BRL"
     if state == "await_valor_moeda":
         moeda_atual = str(contexto.get("moeda_atual") or "a moeda")
-        return f"Passo 6: quanto sera pago em {moeda_atual}?"
+        return f"Passo 6: quanto será pago em {moeda_atual}?"
     if state == "await_cambio_moeda":
         moeda_atual = str(contexto.get("moeda_atual") or "a moeda")
-        return f"Passo 7: qual o cambio do {moeda_atual} para USD?"
+        return f"Passo 7: qual o câmbio do {moeda_atual} para USD?"
     if state == "await_fechamento_gramas":
-        return "Passo 8: quantas gramas foram fechadas? (use quando for venda/cambio)"
+        return "Passo 8: quantas gramas foram fechadas? (use quando for venda/câmbio)"
     if state == "await_fechamento_tipo":
         return "Passo 9: fechamento total ou parcial?"
     if state == "await_pessoa":
         return "Passo 10: nome da pessoa?"
     if state == "await_forma_pagamento":
-        return "Passo 11: forma de pagamento (dinheiro, transferencia, cheque, misto)"
+        return "Passo 11: forma de pagamento (dinheiro, transferência, cheque, misto)"
     if state == "await_observacoes":
-        return "Passo 12: observacoes (ou digite 'nenhuma')"
+        return "Passo 12: observações (ou digite 'nenhuma')"
     return "Continue informando os dados solicitados."
 
 
@@ -440,7 +440,7 @@ def _guided_try_back_command(
     if not target_state:
         return {
             "mensagem": (
-                "Para corrigir sem cancelar, envie: 'voltar peso', 'voltar preco' ou 'voltar teor'."
+                "Para corrigir sem cancelar, envie: 'voltar peso', 'voltar preço' ou 'voltar teor'."
             ),
             "dados": {"etapa": estado},
         }
@@ -601,7 +601,7 @@ def _try_handle_whatsapp_commands(
 
         op_id = _parse_operation_id(op_token)
         if op_id is None:
-            return {"mensagem": "ID invalido. Exemplo: editar 123 preco 110", "dados": {"acao": "editar_operacao"}}
+            return {"mensagem": "ID inválido. Exemplo: editar 123 preco 110", "dados": {"acao": "editar_operacao"}}
 
         transacao_resp = (
             db.client.table("transacoes")
@@ -612,20 +612,20 @@ def _try_handle_whatsapp_commands(
         )
         rows = cast(List[Dict[str, Any]], transacao_resp.data or [])
         if not rows:
-            return {"mensagem": f"Operacao {op_id} nao encontrada.", "dados": {"acao": "editar_operacao"}}
+            return {"mensagem": f"Operação {op_id} não encontrada.", "dados": {"acao": "editar_operacao"}}
 
         row = rows[0]
         is_admin = str(usuario.get("tipo_usuario", "")).lower() == "admin"
         if not is_admin and str(row.get("operador_id", "")) != remetente:
             return {
-                "mensagem": "Voce nao tem permissao para editar esta operacao.",
+                "mensagem": "Você não tem permissão para editar esta operação.",
                 "dados": {"acao": "editar_operacao", "permitido": False},
             }
 
         field = _normalize_edit_field(field_token)
         if field is None:
             return {
-                "mensagem": "Campo invalido. Use: preco, quantidade, moeda, valor_moeda ou cambio.",
+                "mensagem": "Campo inválido. Use: preco, quantidade, moeda, valor_moeda ou cambio.",
                 "dados": {"acao": "editar_operacao"},
             }
 
@@ -640,9 +640,9 @@ def _try_handle_whatsapp_commands(
         if field in {"quantidade", "cotacao_usada", "valor_moeda", "cambio_para_usd"}:
             novo = _parse_decimal_from_text(value_token, field)
             if field in {"quantidade", "cotacao_usada", "cambio_para_usd"} and novo <= 0:
-                return {"mensagem": f"Valor invalido para {field}.", "dados": {"acao": "editar_operacao"}}
+                return {"mensagem": f"Valor inválido para {field}.", "dados": {"acao": "editar_operacao"}}
             if field == "valor_moeda" and novo < 0:
-                return {"mensagem": "O valor da moeda nao pode ser negativo.", "dados": {"acao": "editar_operacao"}}
+                return {"mensagem": "O valor da moeda não pode ser negativo.", "dados": {"acao": "editar_operacao"}}
 
             if field == "quantidade":
                 quantidade = novo
@@ -661,7 +661,7 @@ def _try_handle_whatsapp_commands(
             nova_moeda = _normalize_text(value_token).upper()
             if nova_moeda not in _MOEDAS_SUPORTADAS:
                 return {
-                    "mensagem": "Moeda invalida. Use: USD, EUR, SRD ou BRL.",
+                    "mensagem": "Moeda inválida. Use: USD, EUR, SRD ou BRL.",
                     "dados": {"acao": "editar_operacao"},
                 }
             moeda = nova_moeda
@@ -682,7 +682,7 @@ def _try_handle_whatsapp_commands(
 
         db.client.table("transacoes").update(update_payload).eq("id", op_id).execute()
         return {
-            "mensagem": f"✅ Operacao {op_id} atualizada com sucesso.",
+            "mensagem": f"✅ Operação {op_id} atualizada com sucesso.",
             "dados": {"acao": "editar_operacao", "id": op_id, "campos": list(update_payload.keys())},
         }
 
@@ -691,7 +691,7 @@ def _try_handle_whatsapp_commands(
     if cancel_match:
         op_id = _parse_operation_id(cancel_match.group(2))
         if op_id is None:
-            return {"mensagem": "ID invalido. Exemplo: cancelar 123", "dados": {"acao": "cancelar_operacao"}}
+            return {"mensagem": "ID inválido. Exemplo: cancelar 123", "dados": {"acao": "cancelar_operacao"}}
 
         transacao_resp = (
             db.client.table("transacoes")
@@ -702,19 +702,19 @@ def _try_handle_whatsapp_commands(
         )
         rows = cast(List[Dict[str, Any]], transacao_resp.data or [])
         if not rows:
-            return {"mensagem": f"Operacao {op_id} nao encontrada.", "dados": {"acao": "cancelar_operacao"}}
+            return {"mensagem": f"Operação {op_id} não encontrada.", "dados": {"acao": "cancelar_operacao"}}
 
         row = rows[0]
         is_admin = str(usuario.get("tipo_usuario", "")).lower() == "admin"
         if not is_admin and str(row.get("operador_id", "")) != remetente:
             return {
-                "mensagem": "Voce nao tem permissao para cancelar esta operacao.",
+                "mensagem": "Você não tem permissão para cancelar esta operação.",
                 "dados": {"acao": "cancelar_operacao", "permitido": False},
             }
 
         db.client.table("transacoes").update({"status": "cancelada"}).eq("id", op_id).execute()
         return {
-            "mensagem": f"✅ Operacao {op_id} cancelada com sucesso.",
+            "mensagem": f"✅ Operação {op_id} cancelada com sucesso.",
             "dados": {"acao": "cancelar_operacao", "id": op_id, "status": "cancelada"},
         }
 
@@ -739,9 +739,9 @@ def _build_whatsapp_checklist_menu() -> str:
         "   Ex: caixa | caixa eur | caixa srd | caixa xau\n\n"
         "3) Extrato detalhado\n"
         "   Ex: extrato | extrato hoje | extrato semana\n\n"
-        "4) Editar operacao\n"
+        "4) Editar operação\n"
         "   Ex: editar 123 preco 110 | editar 123 quantidade 2.5\n\n"
-        "5) Cancelar operacao\n"
+        "5) Cancelar operação\n"
         "   Ex: cancelar 123\n"
         "──────────────────\n"
         "Responda com 1 a 5."
@@ -791,21 +791,21 @@ def _build_caixa_response(db: DatabaseClient, requested_currency: Optional[str] 
 
             if taxa_ouro and taxa_ouro > 0:
                 saldo_usd = money(ouro_gramas * taxa_ouro)
-                cambio_txt = f"Cotacao ouro: {money(taxa_ouro)} USD/g"
+                cambio_txt = f"Cotação ouro: {money(taxa_ouro)} USD/g"
             else:
                 saldo_usd = Decimal("0")
-                cambio_txt = "Sem cotacao atual de ouro"
+                cambio_txt = "Sem cotação atual de ouro"
 
             resposta = (
                 f"SALDO ORGANIZADO - XAU\n"
                 f"Data: {day['date']}\n"
-                f"Operacoes hoje: {ops_hoje}\n"
+                f"Operações hoje: {ops_hoje}\n"
                 "--------------------\n"
                 f"1) Ouro em estoque: {ouro_gramas:,.3f} g\n"
-                f"2) Referencia em USD: {saldo_usd:,.2f}\n"
+                f"2) Referência em USD: {saldo_usd:,.2f}\n"
                 f"3) {cambio_txt}\n"
                 "--------------------\n"
-                "Leitura rapida: quanto maior o valor, maior o estoque de ouro."
+                "Leitura rápida: quanto maior o valor, maior o estoque de ouro."
             )
         else:
             saldo_moeda = Decimal(str(moedas.get(moeda, "0")))
@@ -818,24 +818,24 @@ def _build_caixa_response(db: DatabaseClient, requested_currency: Optional[str] 
                 cambio_txt = f"1 USD = {money(cambio)} {moeda}"
             else:
                 saldo_usd = Decimal("0")
-                cambio_txt = "Sem cambio recente"
+                cambio_txt = f"Sem câmbio recente"
 
             resposta = (
                 f"SALDO ORGANIZADO - {moeda}\n"
                 f"Data: {day['date']}\n"
-                f"Operacoes hoje: {ops_hoje}\n"
+                f"Operações hoje: {ops_hoje}\n"
                 "--------------------\n"
                 f"1) Saldo em {moeda}: {saldo_moeda:,.2f}\n"
                 f"2) Equivalente em USD: {saldo_usd:,.2f}\n"
-                f"3) Cambio usado: {cambio_txt}\n"
+                f"3) Câmbio usado: {cambio_txt}\n"
                 "--------------------\n"
-                "Leitura rapida: positivo = entrou mais, negativo = saiu mais."
+                "Leitura rápida: positivo = entrou mais, negativo = saiu mais."
             )
     else:
         resposta = (
             "SALDO ORGANIZADO\n"
             f"Data: {day['date']}\n"
-            f"Operacoes hoje: {ops_hoje}\n"
+            f"Operações hoje: {ops_hoje}\n"
             "====================\n"
             f"1) Ouro em estoque: {ouro_val:,.3f} g ({ouro_situacao})\n"
             "2) Saldos por moeda:\n"
@@ -959,7 +959,7 @@ def _build_extrato_response(
     linhas.append("====================")
     linhas.append("RESUMO:")
     if not transactions:
-        linhas.append("Nenhuma operacao encontrada.")
+        linhas.append("Nenhuma operação encontrada.")
     else:
         if total_compra_g > 0:
             n_c = sum(1 for x in transactions if str(x.get("tipo_operacao") or "").upper() == "COMPRA")
@@ -987,7 +987,7 @@ def _handle_menu_option(remetente: str, mensagem: str, db: DatabaseClient) -> Op
     if option not in {"1", "2", "3", "4", "5"}:
         return {
             "mensagem": (
-                "Opcao invalida. Escolha um numero de 1 a 5.\n\n"
+                "Opção inválida. Escolha um número de 1 a 5.\n\n"
                 f"{_build_whatsapp_checklist_menu()}"
             ),
             "dados": {"etapa": "await_menu_option"},
@@ -1002,7 +1002,7 @@ def _handle_menu_option(remetente: str, mensagem: str, db: DatabaseClient) -> Op
         )
         return {
             "mensagem": (
-                "Registrar operacao.\n"
+                "Registrar operação.\n"
                 "Informe o tipo: compra ou venda."
             ),
             "dados": {"acao": "registrar_operacao"},
@@ -1029,9 +1029,9 @@ def _handle_menu_option(remetente: str, mensagem: str, db: DatabaseClient) -> Op
         _clear_session(db, remetente)
         return {
             "mensagem": (
-                "Editar operacao.\n"
+                "Editar operação.\n"
                 "Formato: editar ID campo valor\n\n"
-                "Campos: preco | quantidade | moeda | valor_moeda | cambio\n"
+                "Campos: preço | quantidade | moeda | valor_moeda | câmbio\n"
                 "Exemplos:\n"
                 "- editar 123 preco 110\n"
                 "- editar 123 quantidade 2.5"
@@ -1043,9 +1043,7 @@ def _handle_menu_option(remetente: str, mensagem: str, db: DatabaseClient) -> Op
     _clear_session(db, remetente)
     return {
         "mensagem": (
-            "Cancelar operacao.\n"
-            "Formato: cancelar ID\n"
-            "Exemplo: cancelar 123"
+            "Cancelar operação.\n"
         ),
         "dados": {"acao": "cancelar_operacao"},
     }
@@ -1097,7 +1095,7 @@ def _start_guided_flow_if_requested(
     }
     _save_session(db, remetente, "await_origem", contexto)
     return {
-        "mensagem": f"Iniciando registro de {tipo}.\nLocal da operacao: balcao ou fora?",
+        "mensagem": f"Iniciando registro de {tipo}.\nLocal da operação: balcão ou fora?",
         "dados": {"intencao": "fluxo_guiado", "etapa": "await_origem"},
     }
 
@@ -1118,7 +1116,7 @@ def _format_resumo(contexto: Dict[str, Any]) -> str:
     fechamento_linha = (
         f"7) Fechamento: {contexto.get('fechamento_gramas')}g ({contexto.get('fechamento_tipo')})\n"
         if tipo_operacao != "compra"
-        else "7) Fechamento: automatico na compra (igual ao peso)\n"
+        else "7) Fechamento: automático na compra (igual ao peso)\n"
     )
 
     return (
@@ -1127,15 +1125,15 @@ def _format_resumo(contexto: Dict[str, Any]) -> str:
         f"2) Origem: {contexto.get('origem')}\n"
         f"3) Teor: {contexto.get('teor')}%\n"
         f"4) Peso: {contexto.get('peso')}g\n"
-        f"5) Preco USD/g: {contexto.get('preco_usd')}\n"
+        f"5) Preço USD/g: {contexto.get('preco_usd')}\n"
         f"6) Total USD: {contexto.get('total_usd')}\n"
         f"{fechamento_linha}"
         f"8) Pessoa: {contexto.get('pessoa')}\n"
         f"9) Forma: {contexto.get('forma_pagamento')}\n"
         f"10) Pagamentos:\n{linhas_pagamento_texto}\n"
         f"11) Total pago USD: {money(total_pago)}\n"
-        f"12) Diferenca USD: {diferenca}\n"
-        "Se estiver correto, responda: sim. Para cancelar, responda: nao."
+        f"12) Diferença USD: {diferenca}\n"
+        "Se estiver correto, responda: sim. Para cancelar, responda: não."
     )
 
 
@@ -1311,7 +1309,7 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
         nome = _sanitize_nome(mensagem)
         if len(nome) < 2:
             return {
-                "mensagem": "Nome invalido. Digite um nome com pelo menos 2 letras.",
+                "mensagem": "Nome inválido. Digite um nome com pelo menos 2 letras.",
                 "dados": {"etapa": "await_nome_usuario"},
             }
 
@@ -1319,8 +1317,8 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
         _clear_session(db, remetente)
         return {
             "mensagem": (
-                f"Bem-vindo, {nome}. Seu cadastro esta completo.\n"
-                "Digite 'menu' para acessar as opcoes."
+                f"Bem-vindo, {nome}. Seu cadastro está completo.\n"
+                "Digite 'menu' para acessar as opções."
             ),
             "dados": {"acao": "cadastro_nome", "nome": nome},
         }
@@ -1328,7 +1326,7 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
     if estado == "await_menu_tipo_operacao":
         if text not in {"compra", "venda"}:
             return {
-                "mensagem": "Tipo invalido. Digite somente: compra ou venda.",
+                "mensagem": "Tipo inválido. Digite somente: compra ou venda.",
                 "dados": {"etapa": "await_menu_tipo_operacao"},
             }
 
@@ -1343,21 +1341,21 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
         )
         _save_session(db, remetente, "await_origem", contexto)
         return {
-            "mensagem": f"Operacao: {text}.\nLocal: balcao ou fora?",
+            "mensagem": f"Operação: {text}.\nLocal: balcão ou fora?",
             "dados": {"intencao": "fluxo_guiado", "etapa": "await_origem"},
         }
 
     if estado == "await_origem":
         if text not in {"balcao", "balcão", "fora"}:
-            return {"mensagem": "Origem invalida. Digite: balcao ou fora.", "dados": {"etapa": estado}}
+            return {"mensagem": "Origem inválida. Digite: balcão ou fora.", "dados": {"etapa": estado}}
         contexto["origem"] = "balcao" if "balcao" in text or "balcão" in text else "fora"
         _save_session(db, remetente, "await_teor", contexto)
-        return {"mensagem": "Qual o teor do ouro em %? (0 a 99.99)", "dados": {"etapa": "await_teor"}}
+        return {"mensagem": "Qual o teor do ouro em %? (0 a 99,99)", "dados": {"etapa": "await_teor"}}
 
     if estado == "await_teor":
         teor = _parse_decimal_from_text(mensagem, "teor")
         if teor < 0 or teor > Decimal("99.99"):
-            return {"mensagem": "O teor deve estar entre 0 e 99.99.", "dados": {"etapa": estado}}
+            return {"mensagem": "O teor deve estar entre 0 e 99,99.", "dados": {"etapa": estado}}
         contexto["teor"] = str(money(teor))
         _save_session(db, remetente, "await_peso", contexto)
         return {"mensagem": "Quantas gramas?", "dados": {"etapa": "await_peso"}}
@@ -1370,7 +1368,7 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
         _save_session(db, remetente, "await_preco_moeda", contexto)
         return {
             "mensagem": (
-                "Moeda base para precificacao:\n"
+                "Moeda base para precificação:\n"
                 "USD, EUR, SRD ou BRL"
             ),
             "dados": {"etapa": "await_preco_moeda"},
@@ -1380,20 +1378,20 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
         moeda_preco = _normalize_text(mensagem).upper()
         if moeda_preco not in _MOEDAS_SUPORTADAS:
             return {
-                "mensagem": "Moeda invalida. Escolha: USD, EUR, SRD ou BRL.",
+                "mensagem": "Moeda inválida. Escolha: USD, EUR, SRD ou BRL.",
                 "dados": {"etapa": estado},
             }
         contexto["preco_moeda"] = moeda_preco
         _save_session(db, remetente, "await_preco_usd", contexto)
         return {
-            "mensagem": f"Informe o preco por grama em {moeda_preco}.",
+            "mensagem": f"Informe o preço por grama em {moeda_preco}.",
             "dados": {"etapa": "await_preco_usd"},
         }
 
     if estado == "await_preco_usd":
         preco = _parse_decimal_from_text(mensagem, "preco_usd")
         if preco <= 0:
-            return {"mensagem": "Preco deve ser maior que zero.", "dados": {"etapa": estado}}
+            return {"mensagem": "Preço deve ser maior que zero.", "dados": {"etapa": estado}}
 
         preco_moeda = str(contexto.get("preco_moeda", "USD")).upper()
         if preco_moeda != "USD":
@@ -1423,7 +1421,7 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
     if estado == "await_preco_cambio":
         cambio = _parse_decimal_from_text(mensagem, "cambio_preco")
         if cambio <= 0:
-            return {"mensagem": "Cambio deve ser maior que zero.", "dados": {"etapa": estado}}
+            return {"mensagem": "Câmbio deve ser maior que zero.", "dados": {"etapa": estado}}
 
         preco_moeda = str(contexto.get("preco_moeda", "USD")).upper()
         preco_moeda_valor = Decimal(str(contexto.get("preco_moeda_valor", "0")))
@@ -1437,8 +1435,8 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
         _save_session(db, remetente, "await_moedas", contexto)
         return {
             "mensagem": (
-                f"Conversao feita: {preco_usd} USD/g.\n"
-                f"Total da operacao: {total} USD.\n"
+                f"Conversão feita: {preco_usd} USD/g.\n"
+                f"Total da operação: {total} USD.\n"
                 "Informe as moedas de pagamento: USD, EUR, SRD, BRL"
             ),
             "dados": {"etapa": "await_moedas"},
@@ -1447,7 +1445,7 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
     if estado == "await_moedas":
         moedas = _extract_moedas(mensagem)
         if not moedas:
-            return {"mensagem": "Nao entendi as moedas. Exemplo: USD e SRD", "dados": {"etapa": estado}}
+            return {"mensagem": "Não entendi as moedas. Exemplo: USD e SRD", "dados": {"etapa": estado}}
         contexto["moedas"] = moedas
         contexto["moeda_index"] = 0
         contexto["pagamentos"] = []
@@ -1456,8 +1454,8 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
         total_operacao = Decimal(str(contexto.get("total_usd", "0")))
         return {
             "mensagem": (
-                f"Total da operacao: {money(total_operacao)} USD.\n"
-                f"Quanto sera pago em {moedas[0]}?"
+                f"Total da operação: {money(total_operacao)} USD.\n"
+                f"Quanto será pago em {moedas[0]}?"
             ),
             "dados": {"etapa": "await_valor_moeda"},
         }
@@ -1466,7 +1464,7 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
         moeda_atual = str(contexto.get("moeda_atual"))
         valor_moeda = _parse_decimal_from_text(mensagem, "valor_moeda")
         if valor_moeda < 0:
-            return {"mensagem": "Valor da moeda nao pode ser negativo.", "dados": {"etapa": estado}}
+            return {"mensagem": "Valor da moeda não pode ser negativo.", "dados": {"etapa": estado}}
         pagamento: Dict[str, Any] = {
             "moeda": moeda_atual,
             "valor_moeda": str(money(valor_moeda)),
@@ -1485,8 +1483,8 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
             return {
                 "mensagem": (
                     f"{moeda_atual}: {money(valor_moeda)} registrado.\n"
-                    f"Total da operacao: {money(total_operacao)} USD.\n"
-                    f"Cambio do {moeda_atual}: 1 USD = quantos {moeda_atual}?"
+                    f"Total da operação: {money(total_operacao)} USD.\n"
+                    f"Câmbio do {moeda_atual}: 1 USD = quantos {moeda_atual}?"
                 ),
                 "dados": {"etapa": "await_cambio_moeda"},
             }
@@ -1502,7 +1500,7 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
             _save_session(db, remetente, "await_valor_moeda", contexto)
             return {
                 "mensagem": (
-                    f"Pago ate agora: {money(total_pago_parcial)} USD. Restante: {restante} USD.\n"
+                    f"Pago até agora: {money(total_pago_parcial)} USD. Restante: {restante} USD.\n"
                     f"Valor em {moedas[idx]}?"
                 ),
                 "dados": {"etapa": "await_valor_moeda"},
@@ -1520,7 +1518,7 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
             return {
                 "mensagem": (
                     f"Total pago: {money(total_pago)} USD.\n"
-                    f"Diferenca atual: {money(total_operacao - total_pago)} USD.\n"
+                    f"Diferença atual: {money(total_operacao - total_pago)} USD.\n"
                     "Fechamento calculado automaticamente.\n"
                     "Informe o nome da contraparte."
                 ),
@@ -1531,7 +1529,7 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
         return {
             "mensagem": (
                 f"Total pago: {money(total_pago)} USD.\n"
-                f"Diferenca atual: {money(total_operacao - total_pago)} USD.\n"
+                f"Diferença atual: {money(total_operacao - total_pago)} USD.\n"
                 "Informe as gramas fechadas."
             ),
             "dados": {"etapa": "await_fechamento_gramas"},
@@ -1540,7 +1538,7 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
     if estado == "await_cambio_moeda":
         cambio = _parse_decimal_from_text(mensagem, "cambio")
         if cambio <= 0:
-            return {"mensagem": "Cambio deve ser maior que zero.", "dados": {"etapa": estado}}
+            return {"mensagem": "Câmbio deve ser maior que zero.", "dados": {"etapa": estado}}
         pagamentos = list(contexto.get("pagamentos", []))
         if not pagamentos:
             _save_session(db, remetente, "await_moedas", contexto)
@@ -1566,7 +1564,7 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
             _save_session(db, remetente, "await_valor_moeda", contexto)
             return {
                 "mensagem": (
-                    f"Pago ate agora: {money(total_pago_parcial)} USD. Restante: {restante} USD.\n"
+                    f"Pago até agora: {money(total_pago_parcial)} USD. Restante: {restante} USD.\n"
                     f"Valor em {moedas[idx]}?"
                 ),
                 "dados": {"etapa": "await_valor_moeda"},
@@ -1584,7 +1582,7 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
             return {
                 "mensagem": (
                     f"Total pago: {money(total_pago)} USD.\n"
-                    f"Diferenca atual: {money(total_operacao - total_pago)} USD.\n"
+                    f"Diferença atual: {money(total_operacao - total_pago)} USD.\n"
                     "Fechamento calculado automaticamente.\n"
                     "Informe o nome da contraparte."
                 ),
@@ -1595,7 +1593,7 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
         return {
             "mensagem": (
                 f"Total pago: {money(total_pago)} USD.\n"
-                f"Diferenca atual: {money(total_operacao - total_pago)} USD.\n"
+                f"Diferença atual: {money(total_operacao - total_pago)} USD.\n"
                 "Informe as gramas fechadas."
             ),
             "dados": {"etapa": "await_fechamento_gramas"},
@@ -1604,7 +1602,7 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
     if estado == "await_fechamento_gramas":
         fechamento = _parse_decimal_from_text(mensagem, "fechamento_gramas")
         if fechamento < 0:
-            return {"mensagem": "Fechamento em gramas nao pode ser negativo.", "dados": {"etapa": estado}}
+            return {"mensagem": "Fechamento em gramas não pode ser negativo.", "dados": {"etapa": estado}}
         contexto["fechamento_gramas"] = str(money(fechamento))
         _save_session(db, remetente, "await_fechamento_tipo", contexto)
         return {"mensagem": "Fechamento total ou parcial?", "dados": {"etapa": "await_fechamento_tipo"}}
@@ -1618,22 +1616,22 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
 
     if estado == "await_pessoa":
         if len(mensagem.strip()) < 2:
-            return {"mensagem": "Informe um nome valido.", "dados": {"etapa": estado}}
+            return {"mensagem": "Informe um nome válido.", "dados": {"etapa": estado}}
         contexto["pessoa"] = mensagem.strip()
         _save_session(db, remetente, "await_forma_pagamento", contexto)
-        return {"mensagem": "Forma de pagamento? (dinheiro, transferencia, cheque, misto)", "dados": {"etapa": "await_forma_pagamento"}}
+        return {"mensagem": "Forma de pagamento? (dinheiro, transferência, cheque, misto)", "dados": {"etapa": "await_forma_pagamento"}}
 
     if estado == "await_forma_pagamento":
         forma = _normalize_text(mensagem)
         if forma not in {"dinheiro", "transferencia", "cheque", "misto"}:
-            return {"mensagem": "Forma invalida. Use: dinheiro, transferencia, cheque ou misto.", "dados": {"etapa": estado}}
+            return {"mensagem": "Forma inválida. Use: dinheiro, transferência, cheque ou misto.", "dados": {"etapa": estado}}
         contexto["forma_pagamento"] = forma
         pagamentos = list(contexto.get("pagamentos", []))
         for pagamento in pagamentos:
             pagamento["forma_pagamento"] = forma
         contexto["pagamentos"] = pagamentos
         _save_session(db, remetente, "await_observacoes", contexto)
-        return {"mensagem": "Quer adicionar observacoes? (ou digite 'nenhuma')", "dados": {"etapa": "await_observacoes"}}
+        return {"mensagem": "Quer adicionar observações? (ou digite 'nenhuma')", "dados": {"etapa": "await_observacoes"}}
 
     if estado == "await_observacoes":
         contexto["observacoes"] = "" if _normalize_text(mensagem) in {"nenhuma", "nao", "não"} else mensagem.strip()
@@ -1644,17 +1642,17 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
     if estado == "await_confirmacao":
         confirm = _extract_confirmacao(mensagem)
         if confirm is None:
-            return {"mensagem": "Digite apenas: sim ou nao.", "dados": {"etapa": estado}}
+            return {"mensagem": "Digite apenas: sim ou não.", "dados": {"etapa": estado}}
 
         if not confirm:
             _clear_session(db, remetente)
-            return {"mensagem": "Operacao cancelada com sucesso.", "dados": {"intencao": "fluxo_guiado_cancelado"}}
+            return {"mensagem": "Operação cancelada com sucesso.", "dados": {"intencao": "fluxo_guiado_cancelado"}}
 
         ativo = db.get_ativo_by_nome("Ouro")
         if not ativo:
             ativo = db.get_ativo_by_nome("Ouro 24k")
         if not ativo:
-            raise HTTPException(status_code=404, detail="Ativo nao encontrado")
+            raise HTTPException(status_code=404, detail="Ativo não encontrado")
 
         ativo_id = int(ativo["id"])
         peso = Decimal(str(contexto.get("peso")))
@@ -1753,10 +1751,10 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
         alerta = "" if not risco_diferenca else " ⚠️ Atenção: diferença acima do limite de risco."
         response_payload: Dict[str, Any] = {
             "mensagem": (
-                f"✅ Operacao salva com sucesso.\n"
+                f"✅ Operação salva com sucesso.\n"
                 f"Total USD: {money(total)}\n"
                 f"Pago USD: {money(total_pago)}\n"
-                f"Diferenca USD: {diferenca}{alerta}"
+                f"Diferença USD: {diferenca}{alerta}"
             ),
             "dados": {
                 "intencao": "fluxo_guiado_confirmado",
@@ -1774,7 +1772,7 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
     if estado == "await_preco_simples":
         cotacao = _parse_decimal_from_text(mensagem, "preco_usd")
         if cotacao <= 0:
-            return {"mensagem": "Preco invalido. Exemplo: 65.50", "dados": {"etapa": estado}}
+            return {"mensagem": "Preço inválido. Exemplo: 65.50", "dados": {"etapa": estado}}
 
         quantidade = Decimal(str(contexto["quantidade"]))
         total_usd = money(quantidade * cotacao)
@@ -1791,7 +1789,7 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
         _MOEDAS_VALIDAS = {"USD", "EUR", "SRD", "BRL"}
         if moeda not in _MOEDAS_VALIDAS:
             return {
-                "mensagem": "Moeda invalida. Use: USD, EUR, SRD ou BRL.",
+                "mensagem": "Moeda inválida. Use: USD, EUR, SRD ou BRL.",
                 "dados": {"etapa": estado},
             }
         contexto["moeda_liquidacao"] = moeda
@@ -1801,7 +1799,7 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
         else:
             _save_session(db, remetente, "await_cambio_simples", contexto)
             return {
-                "mensagem": f"Qual o cambio?\n(1 USD = quantos {moeda})",
+                "mensagem": f"Qual o câmbio?\n(1 USD = quantos {moeda})",
                 "dados": {"etapa": "await_cambio_simples"},
             }
 
@@ -1809,7 +1807,7 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
         cambio = _parse_decimal_from_text(mensagem, "cambio_para_usd")
         if cambio <= 0:
             return {
-                "mensagem": "Cambio invalido. Exemplo: 38",
+                "mensagem": "Câmbio inválido. Exemplo: 38",
                 "dados": {"etapa": estado},
             }
         contexto["cambio_para_usd"] = str(cambio)
@@ -1836,7 +1834,7 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
                 "dados": {"etapa": "await_extrato_data_inicio"},
             }
         return {
-            "mensagem": "Escolha invalida. Digite 1, 2 ou 3.",
+            "mensagem": "Escolha inválida. Digite 1, 2 ou 3.",
             "dados": {"etapa": "await_extrato_periodo"},
         }
 
@@ -1844,14 +1842,14 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
         parsed = _parse_date_user_input(mensagem.strip())
         if not parsed:
             return {
-                "mensagem": "Data invalida. Use o formato DD/MM/AAAA ou AAAA-MM-DD.",
+                "mensagem": "Data inválida. Use o formato DD/MM/AAAA ou AAAA-MM-DD.",
                 "dados": {"etapa": estado},
             }
         _save_session(db, remetente, "await_extrato_data_fim", {"data_inicio": parsed})
         return {
             "mensagem": (
                 f"Data inicial: {parsed}\n"
-                "Agora informe a data final:\n"
+                "Informe a data final:\n"
                 "Ex: 04/04/2026 ou 2026-04-04"
             ),
             "dados": {"etapa": "await_extrato_data_fim"},
@@ -1861,7 +1859,7 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
         parsed = _parse_date_user_input(mensagem.strip())
         if not parsed:
             return {
-                "mensagem": "Data invalida. Use o formato DD/MM/AAAA ou AAAA-MM-DD.",
+                "mensagem": "Data inválida. Use o formato DD/MM/AAAA ou AAAA-MM-DD.",
                 "dados": {"etapa": estado},
             }
         data_inicio = str(contexto.get("data_inicio", ""))
@@ -1873,19 +1871,19 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
             end_day = _build_day_range(parsed)
         except HTTPException:
             return {
-                "mensagem": "Datas invalidas. Use o formato AAAA-MM-DD.",
+                "mensagem": "Datas inválidas. Use o formato AAAA-MM-DD.",
                 "dados": {"etapa": estado},
             }
         if end_day["start"] < start_day["start"]:
             return {
-                "mensagem": "A data final deve ser maior ou igual a data inicial.",
+                "mensagem": "A data final deve ser maior ou igual à data inicial.",
                 "dados": {"etapa": estado},
             }
         label = f"{data_inicio} a {parsed}"
         _clear_session(db, remetente)
         return _build_extrato_response(db, start_day["start"], end_day["end"], label)
 
-    return {"mensagem": "Nao foi possivel continuar o fluxo. Inicie novamente: compra ou venda.", "dados": {"etapa": "reiniciar"}}
+    return {"mensagem": "Não foi possível continuar o fluxo. Inicie novamente: compra ou venda.", "dados": {"etapa": "reiniciar"}}
 
 
 def _finish_transacao_simples(
@@ -1974,10 +1972,10 @@ def _finish_transacao_simples(
             f"Tipo: {tipo_operacao}\n"
             f"Ativo: {nome_ativo_display}\n"
             f"Quantidade: {quantidade}g\n"
-            f"Preco: ${money(cotacao)}/g\n"
+            f"Preço: ${money(cotacao)}/g\n"
             f"Total USD: ${total_usd}\n"
             f"Pagamento: {moeda_linha}\n"
-            "Operacao registrada com sucesso."
+            "Operação registrada com sucesso."
         ),
         "dados": {
             "intencao": "registrar_operacao",
@@ -2049,7 +2047,7 @@ async def whatsapp_webhook(
             mensagem=str(body_data.get("mensagem") or body_data.get("Body") or "").strip(),
         )
     except ValidationError:
-        raise HTTPException(status_code=400, detail="Mensagem invalida")
+        raise HTTPException(status_code=400, detail="Mensagem inválida")
 
     # Allow token from header, query (?token=...), or body field for easy Pipedream wiring.
     token = x_webhook_token or request.query_params.get("token") or body_data.get("token")
@@ -2090,7 +2088,7 @@ async def whatsapp_webhook(
 
         return response
     except HTTPException as exc:
-        msg = _ERROS_AMIGAVEIS.get(exc.status_code, "Nao consegui processar. Envie: menu")
+        msg = _ERROS_AMIGAVEIS.get(exc.status_code, "Não consegui processar. Envie: menu")
         response: Dict[str, Any] = {
             "mensagem": f"⚠️ {msg}",
             "dados": {"erro": exc.status_code, "detalhe": exc.detail},
@@ -2108,7 +2106,7 @@ async def whatsapp_webhook(
     except Exception:
         logger.exception("Erro inesperado no webhook")
         response = {
-                "mensagem": f"⚠️ Erro inesperado. Tente de novo.",
+                "mensagem": "⚠️ Erro inesperado. Tente novamente.",
             "dados": {"erro": 500},
         }
         if db and provider_message_id:
@@ -2148,7 +2146,7 @@ async def whatsapp_webhook_twilio(
     mensagem = str(body_data.get("Body") or "").strip()
 
     if not remetente or not mensagem:
-        return _twiml_message("⚠️ Mensagem invalida. Tente de novo.")
+        return _twiml_message("⚠️ Mensagem inválida. Tente novamente.")
 
     payload = WhatsAppWebhookPayload(remetente=remetente, mensagem=mensagem)
     suppress_reply = _should_suppress_twilio_reply(mensagem)
@@ -2184,9 +2182,9 @@ async def whatsapp_webhook_twilio(
 
         if suppress_reply:
             return _twiml_empty_response()
-        return _twiml_message(str(response.get("mensagem") or "Operacao processada."))
+        return _twiml_message(str(response.get("mensagem") or "Operação processada."))
     except HTTPException as exc:
-        msg = _ERROS_AMIGAVEIS.get(exc.status_code, "Nao consegui processar. Envie: menu")
+        msg = _ERROS_AMIGAVEIS.get(exc.status_code, "Não consegui processar. Envie: menu")
         response_payload: Dict[str, Any] = {
             "mensagem": f"⚠️ {msg}",
             "dados": {"erro": exc.status_code, "detalhe": exc.detail},
@@ -2207,7 +2205,7 @@ async def whatsapp_webhook_twilio(
         logger.exception("Erro inesperado no webhook Twilio")
         if suppress_reply:
             return _twiml_empty_response()
-        return _twiml_message("⚠️ Erro inesperado. Tente de novo.")
+        return _twiml_message("⚠️ Erro inesperado. Tente novamente.")
 
 
 @app.get("/reports/daily-closure")
@@ -2328,7 +2326,7 @@ def operation_audit_report(operation_id: int) -> Dict[str, Any]:
     db = get_db()
     result = db.get_gold_operation_audit(operation_id)
     if not result:
-        raise HTTPException(status_code=404, detail="Operacao nao encontrada")
+        raise HTTPException(status_code=404, detail="Operação não encontrada")
     return result
 
 
@@ -2405,7 +2403,7 @@ def _processar_webhook(
     if _is_greeting(mensagem) and _needs_name_onboarding(usuario):
         _save_session(db, remetente, "await_nome_usuario", {"source": "onboarding"})
         return {
-            "mensagem": "Ola. Para comecar, informe seu nome.",
+            "mensagem": "Olá. Para começar, informe seu nome.",
             "dados": {"etapa": "await_nome_usuario"},
         }
 
@@ -2430,7 +2428,7 @@ def _processar_webhook(
             quantidade=None,
             valor_informado=None,
             resposta=(
-                "Nao foi possivel interpretar a mensagem. "
+                "Não foi possível interpretar a mensagem. "
                 "Tente: 'Comprei 2g de ouro a 105' ou 'Taxa USD 5.40'."
             ),
         )
@@ -2471,15 +2469,15 @@ def _processar_webhook(
             keep_menu_state = True
         else:
             resposta = ai_data.resposta or (
-                "Posso ajudar com operacoes de ouro, cambio e consulta de caixa.\n"
-                "Digite 'menu' para ver as opcoes."
+                "Posso ajudar com operações de ouro, câmbio e consulta de caixa.\n"
+                "Digite 'menu' para ver as opções."
             )
 
         if _is_greeting(mensagem) and nome_usuario:
             resposta = (
-                f"Ola, {nome_usuario}.\n"
+                f"Olá, {nome_usuario}.\n"
                 "Como posso ajudar?\n"
-                "Digite 'menu' para ver as opcoes."
+                "Digite 'menu' para ver as opções."
             )
         response_payload: Dict[str, Any] = {
             "mensagem": resposta,
@@ -2524,7 +2522,7 @@ def _processar_webhook(
     ativo = db.get_ativo_by_nome(nome_ativo)
 
     if not ativo:
-        raise HTTPException(status_code=404, detail="Ativo nao encontrado")
+        raise HTTPException(status_code=404, detail="Ativo não encontrado")
 
     ativo_id = int(ativo["id"])
 
@@ -2574,7 +2572,7 @@ def _processar_webhook(
         }.get(tipo_operacao, "operação")
 
         return {
-            "mensagem": f"Informe o preco por grama em USD ({operacao_texto} de {quantidade}g).",
+            "mensagem": f"Informe o preço por grama em USD ({operacao_texto} de {quantidade}g).",
             "dados": {"etapa": "await_preco_simples"},
         }
 
@@ -2601,7 +2599,7 @@ async def edit_operation(
     )
     rows = cast(List[Dict[str, Any]], transacao.data or [])
     if not rows:
-        raise HTTPException(status_code=404, detail="Operacao nao encontrada")
+        raise HTTPException(status_code=404, detail="Operação não encontrada")
 
     body = await request.json()
     
@@ -2620,7 +2618,7 @@ async def edit_operation(
         db.client.table("transacoes").update(update_payload).eq("id", operation_id).execute()
 
     return {
-        "mensagem": f"✅ Operacao OP-{operation_id} editada com sucesso",
+        "mensagem": f"✅ Operação OP-{operation_id} editada com sucesso",
         "dados": {"id": operation_id, "updated_fields": list(update_payload.keys())},
     }
 
@@ -2645,12 +2643,12 @@ async def delete_operation(
     )
     rows = cast(List[Dict[str, Any]], transacao.data or [])
     if not rows:
-        raise HTTPException(status_code=404, detail="Operacao nao encontrada")
+        raise HTTPException(status_code=404, detail="Operação não encontrada")
 
     # Mark as cancelled instead of deleting
     db.client.table("transacoes").update({"status": "cancelada"}).eq("id", operation_id).execute()
 
     return {
-        "mensagem": f"✅ Operacao OP-{operation_id} cancelada",
+        "mensagem": f"✅ Operação OP-{operation_id} cancelada",
         "dados": {"id": operation_id, "status": "cancelada"},
     }
