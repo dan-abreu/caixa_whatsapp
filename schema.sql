@@ -124,6 +124,42 @@ CREATE TABLE IF NOT EXISTS gold_payments (
     criado_em TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Caixa segregado por moeda/commodity (sem referencia unica em USD)
+CREATE TABLE IF NOT EXISTS caixas (
+    id BIGSERIAL PRIMARY KEY,
+    moeda VARCHAR(10) NOT NULL UNIQUE,
+    saldo NUMERIC(20, 8) NOT NULL DEFAULT 0,
+    atualizado_em TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    criado_em TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT chk_caixas_moeda CHECK (moeda IN ('XAU', 'USD', 'EUR', 'SRD', 'BRL'))
+);
+
+INSERT INTO caixas (moeda, saldo)
+VALUES
+    ('XAU', 0),
+    ('USD', 0),
+    ('EUR', 0),
+    ('SRD', 0),
+    ('BRL', 0)
+ON CONFLICT (moeda) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS caixas_movimentacoes (
+    id BIGSERIAL PRIMARY KEY,
+    caixa_moeda VARCHAR(10) NOT NULL,
+    tipo_operacao VARCHAR(30) NOT NULL,
+    gold_transaction_id BIGINT REFERENCES gold_transactions(id),
+    valor NUMERIC(20, 8) NOT NULL,
+    saldo_anterior NUMERIC(20, 8) NOT NULL,
+    saldo_posterior NUMERIC(20, 8) NOT NULL,
+    descricao TEXT,
+    pessoa TEXT,
+    criado_em TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT fk_caixas_movimentacoes_caixa_moeda
+        FOREIGN KEY (caixa_moeda) REFERENCES caixas(moeda),
+    CONSTRAINT chk_caixas_mov_tipo_operacao
+        CHECK (tipo_operacao IN ('compra', 'venda', 'ajuste', 'adiantamento', 'devolucao'))
+);
+
 CREATE TABLE IF NOT EXISTS multi_agent_runs (
     id BIGSERIAL PRIMARY KEY,
     objective TEXT NOT NULL,
@@ -161,6 +197,15 @@ CREATE INDEX IF NOT EXISTS idx_gold_transactions_operador
 
 CREATE INDEX IF NOT EXISTS idx_gold_payments_transaction
     ON gold_payments (gold_transaction_id);
+
+CREATE INDEX IF NOT EXISTS idx_caixas_moeda
+    ON caixas (moeda);
+
+CREATE INDEX IF NOT EXISTS idx_caixas_mov_moeda
+    ON caixas_movimentacoes (caixa_moeda, criado_em DESC);
+
+CREATE INDEX IF NOT EXISTS idx_caixas_mov_tx_id
+    ON caixas_movimentacoes (gold_transaction_id, criado_em DESC);
 
 CREATE INDEX IF NOT EXISTS idx_multi_agent_runs_criado_em
     ON multi_agent_runs (criado_em DESC);
@@ -202,7 +247,8 @@ VALUES
     ('Ouro 24k', 'ouro'),
     ('USD', 'moeda'),
     ('EUR', 'moeda'),
-    ('SRD', 'moeda')
+    ('SRD', 'moeda'),
+    ('BRL', 'moeda')
 ON CONFLICT (nome) DO NOTHING;
 
 INSERT INTO usuarios (nome, telefone, tipo_usuario)

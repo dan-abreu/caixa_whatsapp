@@ -92,6 +92,7 @@ Tabelas principais:
 - `usuarios`, `ativos`, `taxas_diarias`, `transacoes`, `logs`
 - `sessoes_conversa`, `mensagens_processadas`
 - `gold_transactions`, `gold_payments`
+- `caixas`, `caixas_movimentacoes`
 
 ## Execução da API
 
@@ -206,6 +207,13 @@ Subcaixa por moeda:
 - `caixa xau` (ou `caixa ouro`)
 
 Para `XAU`, o sistema mostra saldo em gramas e referência em USD com base na última cotação.
+Para `XAU`, o sistema mostra saldo em gramas. Os 5 caixas são independentes (`XAU`, `USD`, `EUR`, `SRD`, `BRL`), sem referência única em USD.
+
+Se seu ambiente já existia antes da criação dos 5 caixas, execute também:
+
+```powershell
+.\.venv\Scripts\python.exe .\backfill_caixas.py
+```
 
 ## Testes Locais Rápidos
 
