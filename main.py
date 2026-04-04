@@ -306,6 +306,38 @@ def _extract_moedas(value: str) -> List[str]:
     return found
 
 
+def _is_help_menu_request(message: str) -> bool:
+    text = _normalize_text(message)
+    keywords = [
+        "menu",
+        "ajuda",
+        "help",
+        "comandos",
+        "o que voce pode fazer",
+        "o que você pode fazer",
+        "como funciona",
+        "funcionalidades",
+    ]
+    return any(k in text for k in keywords)
+
+
+def _build_whatsapp_checklist_menu() -> str:
+    return (
+        "Checklist de funcionalidades:\n"
+        "[1] Registrar operacao\n"
+        "- Exemplo: Comprei 2g de ouro a 105\n\n"
+        "[2] Consultar caixa/extrato\n"
+        "- Exemplo: caixa\n\n"
+        "[3] Atualizar taxa (admin)\n"
+        "- Exemplo: Taxa USD 5.40\n\n"
+        "[4] Editar operacao\n"
+        "- Endpoint: POST /operations/{id}/edit\n\n"
+        "[5] Cancelar operacao\n"
+        "- Endpoint: DELETE /operations/{id}\n\n"
+        "Diga o numero da opcao ou escreva sua solicitacao."
+    )
+
+
 def _save_session(db: DatabaseClient, remetente: str, estado: str, contexto: Dict[str, Any]) -> None:
     _SESSION_CACHE[remetente] = {"estado": estado, "contexto": contexto}
     db.save_conversation_session(remetente=remetente, estado=estado, contexto=contexto)
@@ -1361,7 +1393,13 @@ def _processar_webhook(
     ativo_extraido = ai_data.ativo
 
     if intencao == "conversar":
-        resposta = ai_data.resposta or "Pode me dizer mais? Exemplos: 'Comprei 2g de ouro', 'Vendi 3g de ouro', 'Taxa ouro 70.00'."
+        if _is_help_menu_request(mensagem):
+            resposta = _build_whatsapp_checklist_menu()
+        else:
+            resposta = ai_data.resposta or (
+                "Posso te ajudar com operacoes, extrato e taxas. "
+                "Se quiser, envie 'menu' para ver um checklist completo."
+            )
         response_payload: Dict[str, Any] = {
             "mensagem": resposta,
             "dados": {"intencao": intencao},
