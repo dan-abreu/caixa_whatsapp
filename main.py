@@ -910,13 +910,15 @@ def _build_extrato_response(
         pessoa = str(t.get("pessoa") or "").strip()
         observacoes = str(t.get("observacoes") or "").strip()
         status = str(t.get("status") or "registrada")
+        source = str(t.get("source") or "transacoes")
         tid = t.get("id")
+        id_prefixado = f"GT-{tid}" if source == "gold_transactions" else f"T-{tid}"
 
         linhas.append("--------------------")
         status_tag = f" [{status.upper()}]" if status not in ("registrada", "") else ""
         linhas.append(f"#{i} | {data_fmt} | {tipo}{status_tag}")
         if tid:
-            linhas.append(f"ID: {tid}")
+            linhas.append(f"ID: {id_prefixado}")
         if peso > 0:
             linhas.append(f"Peso: {peso:,.3f} g")
         if preco_usd > 0:
