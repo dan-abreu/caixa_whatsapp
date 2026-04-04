@@ -176,6 +176,8 @@ def _load_lexicon() -> Dict[str, Any]:
 
 
 _LEXICON = _load_lexicon()
+_VALID_INTENCOES = {"atualizar_taxa", "registrar_operacao", "consultar_relatorio", "conversar"}
+_VALID_ATIVOS = {"ouro", "usd", "eur", "srd"}
 
 
 def _normalize_text(value: str) -> str:
@@ -203,6 +205,113 @@ def _extract_first_number(text: str) -> float | None:
         return float(raw)
     except ValueError:
         return None
+
+
+def _to_float_or_none(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        parsed = float(str(value).replace(",", "."))
+    except (TypeError, ValueError):
+        return None
+    return parsed
+
+
+def _normalize_ativo_value(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = _normalize_text(str(value))
+    if not text:
+        return None
+    aliases = cast(Dict[str, str], _LEXICON.get("ativo_aliases", {}))
+    resolved = aliases.get(text, text)
+    return resolved if resolved in _VALID_ATIVOS else None
+
+
+def _contains_any_token(text: str, words: set[str]) -> bool:
+    tokens = set(re.split(r"[^a-zA-Z]+", text))
+    return bool(tokens.intersection(words))
+
+
+def _sanitize_extracted_payload(message: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize AI payload and reject unsupported/ambiguous operational actions."""
+    text = _normalize_text(message)
+    intencao = _normalize_text(str(payload.get("intencao", "conversar")))
+    if intencao not in _VALID_INTENCOES:
+        intencao = "conversar"
+
+    ativo = _normalize_ativo_value(payload.get("ativo"))
+    quantidade = _to_float_or_none(payload.get("quantidade"))
+    valor_informado = _to_float_or_none(payload.get("valor_informado"))
+
+    if quantidade is not None and quantidade <= 0:
+        quantidade = None
+    if valor_informado is not None and valor_informado <= 0:
+        valor_informado = None
+
+    buy_words = set(cast(list[str], _LEXICON.get("buy_words", [])))
+    sell_words = set(cast(list[str], _LEXICON.get("sell_words", [])))
+    exchange_words = set(cast(list[str], _LEXICON.get("exchange_words", [])))
+    rate_words = set(cast(list[str], _LEXICON.get("rate_words", [])))
+    report_words = set(cast(list[str], _LEXICON.get("report_words", [])))
+
+    has_op_signal = _contains_any_token(text, buy_words.union(sell_words).union(exchange_words))
+    has_rate_signal = _contains_any_token(text, rate_words)
+    has_report_signal = _contains_any_token(text, report_words)
+
+    if intencao == "consultar_relatorio":
+        if not has_report_signal and "caixa" not in text and "extrato" not in text:
+            intencao = "conversar"
+        return {
+            "intencao": intencao,
+            "ativo": None,
+            "quantidade": None,
+            "valor_informado": None,
+            "resposta": payload.get("resposta"),
+        }
+
+    if intencao == "atualizar_taxa":
+        resolved_value = valor_informado if valor_informado is not None else quantidade
+        if not has_rate_signal or not ativo or resolved_value is None:
+            return {
+                "intencao": "conversar",
+                "ativo": None,
+                "quantidade": None,
+                "valor_informado": None,
+                "resposta": "Para atualizar taxa, envie no formato: Taxa ouro 70.00",
+            }
+        return {
+            "intencao": "atualizar_taxa",
+            "ativo": ativo,
+            "quantidade": None,
+            "valor_informado": resolved_value,
+            "resposta": None,
+        }
+
+    if intencao == "registrar_operacao":
+        if not has_op_signal or not ativo or quantidade is None:
+            return {
+                "intencao": "conversar",
+                "ativo": None,
+                "quantidade": None,
+                "valor_informado": None,
+                "resposta": "Para registrar operação, envie algo como: Comprei 2g de ouro a 105",
+            }
+        return {
+            "intencao": "registrar_operacao",
+            "ativo": ativo,
+            "quantidade": quantidade,
+            "valor_informado": valor_informado,
+            "resposta": None,
+        }
+
+    return {
+        "intencao": "conversar",
+        "ativo": None,
+        "quantidade": None,
+        "valor_informado": None,
+        "resposta": payload.get("resposta"),
+    }
 
 
 def _heuristic_extract(message: str) -> Dict[str, Any]:
@@ -327,18 +436,21 @@ def extract_message_data(message: str) -> Dict[str, Any]:
     try:
         response = requests.post(url, json=payload, timeout=20)
     except requests.RequestException:
-        return _heuristic_extract(message)
+        return _sanitize_extracted_payload(message, _heuristic_extract(message))
 
     if response.status_code >= 400:
-        return _heuristic_extract(message)
+        return _sanitize_extracted_payload(message, _heuristic_extract(message))
 
+    body: Dict[str, Any] = {}
+    text = ""
     try:
-        body: Dict[str, Any] = response.json()
-        text = body["candidates"][0]["content"]["parts"][0]["text"]
+        body = cast(Dict[str, Any], response.json())
+        text = str(body["candidates"][0]["content"]["parts"][0]["text"])
     except (KeyError, IndexError, TypeError, ValueError):
-        return _heuristic_extract(message)
+        return _sanitize_extracted_payload(message, _heuristic_extract(message))
 
     try:
-        return _extract_json_blob(text)
+        extracted = _extract_json_blob(text)
+        return _sanitize_extracted_payload(message, extracted)
     except AIServiceError:
-        return _heuristic_extract(message)
+        return _sanitize_extracted_payload(message, _heuristic_extract(message))

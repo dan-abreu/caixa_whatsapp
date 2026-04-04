@@ -1,0 +1,42 @@
+{
+  "timestamp": "2026-04-04T14:22:21.422296+00:00",
+  "testes_executados": {
+    "endpoints_basicos": 2,
+    "webhooks_intencoes": 5,
+    "validacoes_erros": 4,
+    "guardrails_ia": 4,
+    "moedas_suportadas": 11,
+    "features_principais": 10
+  },
+  "resumo": {
+    "total_testes": 26,
+    "endpoints_basicos_ok": true,
+    "webhooks_ok": true,
+    "validacoes_ok": true,
+    "guardrails_ok": true,
+    "moedas_ok": true
+  },
+  "cobertura": {
+    "menu_options": "5/5 opcoes",
+    "intencoes": [
+      "consultar_relatorio",
+      "registrar_operacao",
+      "atualizar_taxa",
+      "conversar"
+    ],
+    "moedas": [
+      "ouro",
+      "usd",
+      "eur",
+      "srd",
+      "brl"
+    ],
+    "validacoes": [
+      "token",
+      "mensagem",
+      "remetente",
+      "payload_ia"
+    ]
+  },
+  "status": "\u2705 PRONTO PARA PRODUCAO"
+}

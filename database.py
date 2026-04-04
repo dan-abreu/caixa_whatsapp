@@ -25,6 +25,78 @@ class DatabaseClient:
 
         self.client: Any = create_client(url, key)
 
+    def _safe_record_fx_rate(
+        self,
+        base_currency: str,
+        quote_currency: str,
+        rate: Decimal,
+        source: str = "app_operation",
+    ) -> None:
+        """Best-effort FX snapshot for audit; no-op if table is not migrated yet."""
+        if base_currency.upper() == quote_currency.upper():
+            return
+        try:
+            payload: Dict[str, Any] = {
+                "base_currency": base_currency.upper(),
+                "quote_currency": quote_currency.upper(),
+                "rate": str(rate),
+                "source": source,
+                "captured_at": datetime.now(timezone.utc).isoformat(),
+            }
+            self.client.table("fx_rates").insert(payload).execute()
+        except Exception:
+            return
+
+    def _safe_record_journal_entry(
+        self,
+        reference_table: str,
+        reference_id: Optional[int],
+        description: str,
+        source_message_id: Optional[str],
+        created_by: Optional[str],
+        metadata: Dict[str, Any],
+        lines: List[Dict[str, Any]],
+    ) -> None:
+        """Best-effort immutable accounting write; no-op if journal tables are absent."""
+        if not lines:
+            return
+        try:
+            header_payload: Dict[str, Any] = {
+                "reference_table": reference_table,
+                "reference_id": reference_id,
+                "description": description,
+                "source_message_id": source_message_id,
+                "created_by": created_by,
+                "metadata": metadata,
+                "posted_at": datetime.now(timezone.utc).isoformat(),
+            }
+            header_resp = self.client.table("accounting_journal_entries").insert(header_payload).execute()
+            header_data = cast(List[Dict[str, Any]], header_resp.data or [])
+            if not header_data:
+                return
+
+            entry_id = header_data[0].get("id")
+            if not entry_id:
+                return
+
+            rows: List[Dict[str, Any]] = []
+            for line in lines:
+                rows.append(
+                    {
+                        "journal_entry_id": entry_id,
+                        "account_code": line.get("account_code"),
+                        "currency_code": line.get("currency_code", "USD"),
+                        "debit": str(line.get("debit", Decimal("0"))),
+                        "credit": str(line.get("credit", Decimal("0"))),
+                        "commodity_symbol": line.get("commodity_symbol"),
+                        "quantity": str(line["quantity"]) if line.get("quantity") is not None else None,
+                    }
+                )
+
+            self.client.table("accounting_journal_lines").insert(rows).execute()
+        except Exception:
+            return
+
     def get_ativo_by_nome(self, nome: str) -> Optional[Dict[str, Any]]:
         response = (
             self.client.table("ativos")
@@ -50,6 +122,20 @@ class DatabaseClient:
             return fallback_data[0] if fallback_data else None
 
         return None
+
+    def get_ativo_by_id(self, ativo_id: int) -> Optional[Dict[str, Any]]:
+        try:
+            response = (
+                self.client.table("ativos")
+                .select("id,nome,tipo")
+                .eq("id", ativo_id)
+                .limit(1)
+                .execute()
+            )
+            data = cast(List[Dict[str, Any]], response.data or [])
+            return data[0] if data else None
+        except Exception:
+            return None
 
     def get_usuario_by_telefone(self, telefone: str) -> Optional[Dict[str, Any]]:
         response = (
@@ -162,7 +248,147 @@ class DatabaseClient:
         data = cast(List[Dict[str, Any]], response.data or [])
         if not data:
             raise DatabaseError("Falha ao inserir transação.")
-        return data[0]
+
+        created = data[0]
+
+        # Best-effort FX audit snapshot (1 USD = X moeda).
+        moeda_liq = moeda_liquidacao.upper()
+        if moeda_liq != "USD" and cambio_para_usd > 0:
+            self._safe_record_fx_rate(
+                base_currency="USD",
+                quote_currency=moeda_liq,
+                rate=cambio_para_usd,
+                source="transacoes",
+            )
+
+        # Best-effort immutable journal posting in USD equivalent.
+        ativo = self.get_ativo_by_id(ativo_id)
+        ativo_nome = str((ativo or {}).get("nome", f"ATIVO_{ativo_id}"))
+        ativo_tipo = str((ativo or {}).get("tipo", ""))
+        if ativo_tipo == "ouro":
+            asset_code = "INVENTORY_COMMODITIES"
+        elif ativo_tipo == "moeda":
+            asset_code = "FX_POSITION_ASSET"
+        else:
+            # Keep scope lean: unknown asset types default to FX position accounting.
+            asset_code = "FX_POSITION_ASSET"
+
+        amount_usd = Decimal(str(valor_total))
+        settlement_amount = valor_moeda if valor_moeda is not None else amount_usd
+        settlement_usd = amount_usd
+        if moeda_liq == "USD":
+            settlement_usd = Decimal(str(settlement_amount))
+        elif cambio_para_usd > 0:
+            settlement_usd = Decimal(str(settlement_amount)) / cambio_para_usd
+
+        lines: List[Dict[str, Any]] = []
+        if tipo_operacao == "compra":
+            lines = [
+                {
+                    "account_code": asset_code,
+                    "currency_code": "USD",
+                    "debit": amount_usd,
+                    "credit": Decimal("0"),
+                    "commodity_symbol": "XAU" if ativo_tipo == "ouro" else None,
+                    "quantity": quantidade,
+                },
+                {
+                    "account_code": "CASH_USD_EQUIV",
+                    "currency_code": "USD",
+                    "debit": Decimal("0"),
+                    "credit": settlement_usd,
+                },
+            ]
+
+            diff = settlement_usd - amount_usd
+            if diff > 0:
+                lines.append(
+                    {
+                        "account_code": "FX_GAIN_LOSS",
+                        "currency_code": "USD",
+                        "debit": diff,
+                        "credit": Decimal("0"),
+                    }
+                )
+            elif diff < 0:
+                lines.append(
+                    {
+                        "account_code": "FX_GAIN_LOSS",
+                        "currency_code": "USD",
+                        "debit": Decimal("0"),
+                        "credit": (diff * Decimal("-1")),
+                    }
+                )
+        elif tipo_operacao in ("venda", "cambio"):
+            lines = [
+                {
+                    "account_code": "CASH_USD_EQUIV",
+                    "currency_code": "USD",
+                    "debit": settlement_usd,
+                    "credit": Decimal("0"),
+                },
+                {
+                    "account_code": asset_code,
+                    "currency_code": "USD",
+                    "debit": Decimal("0"),
+                    "credit": amount_usd,
+                    "commodity_symbol": "XAU" if ativo_tipo == "ouro" else None,
+                    "quantity": quantidade,
+                },
+            ]
+
+            diff = settlement_usd - amount_usd
+            if diff > 0:
+                lines.append(
+                    {
+                        "account_code": "FX_GAIN_LOSS",
+                        "currency_code": "USD",
+                        "debit": Decimal("0"),
+                        "credit": diff,
+                    }
+                )
+            elif diff < 0:
+                lines.append(
+                    {
+                        "account_code": "FX_GAIN_LOSS",
+                        "currency_code": "USD",
+                        "debit": (diff * Decimal("-1")),
+                        "credit": Decimal("0"),
+                    }
+                )
+
+        created_id_raw = created.get("id")
+        created_id: Optional[int] = None
+        if created_id_raw is not None:
+            try:
+                created_id = int(str(created_id_raw))
+            except Exception:
+                created_id = None
+
+        self._safe_record_journal_entry(
+            reference_table="transacoes",
+            reference_id=created_id,
+            description=f"{tipo_operacao} {ativo_nome}",
+            source_message_id=source_message_id,
+            created_by=operador_id,
+            metadata={
+                "ativo_id": ativo_id,
+                "ativo_nome": ativo_nome,
+                "ativo_tipo": ativo_tipo,
+                "quantidade": str(quantidade),
+                "cotacao_usada": str(cotacao_usada),
+                "valor_total_usd": str(valor_total),
+                "settlement_currency": moeda_liq,
+                "settlement_amount": str(settlement_amount),
+                "settlement_usd_equivalent": str(settlement_usd),
+                "realized_fx_diff_usd": str(settlement_usd - amount_usd),
+                "cambio_para_usd": str(cambio_para_usd),
+                "status": status,
+            },
+            lines=lines,
+        )
+
+        return created
 
     def insert_log(
         self,
@@ -295,10 +521,20 @@ class DatabaseClient:
             if pagamentos:
                 rows: List[Dict[str, Any]] = []
                 for pagamento in pagamentos:
+                    moeda = str(pagamento.get("moeda", "USD")).upper()
+                    cambio = Decimal(str(pagamento.get("cambio_para_usd", 1)))
+                    if moeda != "USD" and cambio > 0:
+                        self._safe_record_fx_rate(
+                            base_currency="USD",
+                            quote_currency=moeda,
+                            rate=cambio,
+                            source="gold_payments",
+                        )
+
                     rows.append(
                         {
                             "gold_transaction_id": transaction_id,
-                            "moeda": pagamento.get("moeda"),
+                            "moeda": moeda,
                             "valor_moeda": pagamento.get("valor_moeda"),
                             "cambio_para_usd": pagamento.get("cambio_para_usd"),
                             "valor_usd": pagamento.get("valor_usd"),
@@ -308,9 +544,263 @@ class DatabaseClient:
                     )
                 self.client.table("gold_payments").insert(rows).execute()
 
+            op_kind = str(payload.get("tipo_operacao", "compra"))
+            total_usd = Decimal(str(payload.get("total_usd", 0)))
+            total_paid_usd = Decimal(str(payload.get("total_pago_usd", total_usd)))
+            peso = Decimal(str(payload.get("peso", 0)))
+            pessoa = str(payload.get("pessoa", "N/A"))
+            operador = str(payload.get("operador_id", "N/A"))
+
+            journal_lines: List[Dict[str, Any]] = []
+            if op_kind == "compra":
+                journal_lines = [
+                    {
+                        "account_code": "INVENTORY_COMMODITIES",
+                        "currency_code": "USD",
+                        "debit": total_usd,
+                        "credit": Decimal("0"),
+                        "commodity_symbol": "XAU",
+                        "quantity": peso,
+                    },
+                    {
+                        "account_code": "CASH_USD_EQUIV",
+                        "currency_code": "USD",
+                        "debit": Decimal("0"),
+                        "credit": total_paid_usd,
+                    },
+                ]
+
+                diff = total_paid_usd - total_usd
+                if diff > 0:
+                    journal_lines.append(
+                        {
+                            "account_code": "FX_GAIN_LOSS",
+                            "currency_code": "USD",
+                            "debit": diff,
+                            "credit": Decimal("0"),
+                        }
+                    )
+                elif diff < 0:
+                    journal_lines.append(
+                        {
+                            "account_code": "PAYABLE_CLIENT_SETTLEMENT",
+                            "currency_code": "USD",
+                            "debit": Decimal("0"),
+                            "credit": (diff * Decimal("-1")),
+                        }
+                    )
+            else:
+                journal_lines = [
+                    {
+                        "account_code": "CASH_USD_EQUIV",
+                        "currency_code": "USD",
+                        "debit": total_paid_usd,
+                        "credit": Decimal("0"),
+                    },
+                    {
+                        "account_code": "INVENTORY_COMMODITIES",
+                        "currency_code": "USD",
+                        "debit": Decimal("0"),
+                        "credit": total_usd,
+                        "commodity_symbol": "XAU",
+                        "quantity": peso,
+                    },
+                ]
+
+                diff = total_paid_usd - total_usd
+                if diff > 0:
+                    journal_lines.append(
+                        {
+                            "account_code": "FX_GAIN_LOSS",
+                            "currency_code": "USD",
+                            "debit": Decimal("0"),
+                            "credit": diff,
+                        }
+                    )
+                elif diff < 0:
+                    journal_lines.append(
+                        {
+                            "account_code": "RECEIVABLE_CLIENT_SETTLEMENT",
+                            "currency_code": "USD",
+                            "debit": (diff * Decimal("-1")),
+                            "credit": Decimal("0"),
+                        }
+                    )
+
+            self._safe_record_journal_entry(
+                reference_table="gold_transactions",
+                reference_id=int(transaction_id),
+                description=f"{op_kind} ouro - {pessoa}",
+                source_message_id=payload.get("source_message_id"),
+                created_by=operador,
+                metadata={
+                    "pessoa": pessoa,
+                    "tipo_operacao": op_kind,
+                    "peso": str(peso),
+                    "teor": str(payload.get("teor")),
+                    "total_usd": str(total_usd),
+                    "total_paid_usd": str(total_paid_usd),
+                    "settlement_gap_usd": str(total_paid_usd - total_usd),
+                    "pagamentos": pagamentos,
+                },
+                lines=journal_lines,
+            )
+
             return header
         except Exception:
             return None
+
+    def insert_transfer_money(
+        self,
+        origem_moeda: str,
+        destino_moeda: str,
+        valor_origem: Decimal,
+        valor_destino: Decimal,
+        cambio_origem_para_usd: Decimal,
+        cambio_destino_para_usd: Decimal,
+        operador_id: str,
+        taxa_servico_origem: Decimal = Decimal("0"),
+        sender_nome: Optional[str] = None,
+        receiver_nome: Optional[str] = None,
+        source_message_id: Optional[str] = None,
+        status: str = "registrada",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Register transfer money operation with audit-grade FX and accounting records."""
+        origem = origem_moeda.upper()
+        destino = destino_moeda.upper()
+
+        if valor_origem <= 0 or valor_destino <= 0:
+            return None
+        if cambio_origem_para_usd <= 0 or cambio_destino_para_usd <= 0:
+            return None
+
+        valor_origem_usd = valor_origem / cambio_origem_para_usd
+        valor_destino_usd = valor_destino / cambio_destino_para_usd
+        fee_usd = taxa_servico_origem / cambio_origem_para_usd if taxa_servico_origem > 0 else Decimal("0")
+
+        payload: Dict[str, Any] = {
+            "data_hora": datetime.now(timezone.utc).isoformat(),
+            "sender_nome": sender_nome,
+            "receiver_nome": receiver_nome,
+            "origem_moeda": origem,
+            "destino_moeda": destino,
+            "valor_origem": str(valor_origem),
+            "cambio_origem_para_usd": str(cambio_origem_para_usd),
+            "cambio_destino_para_usd": str(cambio_destino_para_usd),
+            "taxa_servico_origem": str(taxa_servico_origem),
+            "valor_destino": str(valor_destino),
+            "valor_origem_usd": str(valor_origem_usd),
+            "valor_destino_usd": str(valor_destino_usd),
+            "operador_id": operador_id,
+            "source_message_id": source_message_id,
+            "status": status,
+            "metadata": metadata or {},
+            "criado_em": datetime.now(timezone.utc).isoformat(),
+        }
+
+        try:
+            response = self.client.table("transfer_money_transactions").insert(payload).execute()
+            data = cast(List[Dict[str, Any]], response.data or [])
+            if not data:
+                return None
+            created = data[0]
+        except Exception:
+            return None
+
+        if origem != "USD":
+            self._safe_record_fx_rate("USD", origem, cambio_origem_para_usd, "transfer_money")
+        if destino != "USD":
+            self._safe_record_fx_rate("USD", destino, cambio_destino_para_usd, "transfer_money")
+
+        transfer_clear_usd = valor_origem_usd - fee_usd
+        fx_diff_usd = transfer_clear_usd - valor_destino_usd
+
+        lines: List[Dict[str, Any]] = [
+            {
+                "account_code": "CASH_USD_EQUIV",
+                "currency_code": "USD",
+                "debit": valor_origem_usd,
+                "credit": Decimal("0"),
+            },
+            {
+                "account_code": "TRANSFER_CLEARING",
+                "currency_code": "USD",
+                "debit": Decimal("0"),
+                "credit": transfer_clear_usd,
+            },
+            {
+                "account_code": "TRANSFER_CLEARING",
+                "currency_code": "USD",
+                "debit": valor_destino_usd,
+                "credit": Decimal("0"),
+            },
+            {
+                "account_code": "CASH_USD_EQUIV",
+                "currency_code": "USD",
+                "debit": Decimal("0"),
+                "credit": valor_destino_usd,
+            },
+        ]
+
+        if fee_usd > 0:
+            lines.append(
+                {
+                    "account_code": "TRANSFER_FEE_REVENUE",
+                    "currency_code": "USD",
+                    "debit": Decimal("0"),
+                    "credit": fee_usd,
+                }
+            )
+
+        if fx_diff_usd > 0:
+            lines.append(
+                {
+                    "account_code": "FX_GAIN_LOSS",
+                    "currency_code": "USD",
+                    "debit": Decimal("0"),
+                    "credit": fx_diff_usd,
+                }
+            )
+        elif fx_diff_usd < 0:
+            lines.append(
+                {
+                    "account_code": "FX_GAIN_LOSS",
+                    "currency_code": "USD",
+                    "debit": fx_diff_usd * Decimal("-1"),
+                    "credit": Decimal("0"),
+                }
+            )
+
+        created_id_raw = created.get("id")
+        created_id: Optional[int] = None
+        if created_id_raw is not None:
+            try:
+                created_id = int(str(created_id_raw))
+            except Exception:
+                created_id = None
+
+        self._safe_record_journal_entry(
+            reference_table="transfer_money_transactions",
+            reference_id=created_id,
+            description=f"transfer money {origem}->{destino}",
+            source_message_id=source_message_id,
+            created_by=operador_id,
+            metadata={
+                "origem_moeda": origem,
+                "destino_moeda": destino,
+                "valor_origem": str(valor_origem),
+                "valor_destino": str(valor_destino),
+                "valor_origem_usd": str(valor_origem_usd),
+                "valor_destino_usd": str(valor_destino_usd),
+                "fee_usd": str(fee_usd),
+                "fx_diff_usd": str(fx_diff_usd),
+                "status": status,
+            },
+            lines=lines,
+        )
+
+        return created
 
     def get_daily_gold_summary(self, start_iso: str, end_iso: str) -> Dict[str, Any]:
         """Count operations from BOTH transacoes (simple) and gold_transactions (guided) tables."""
