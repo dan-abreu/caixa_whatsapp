@@ -813,6 +813,7 @@ def _build_caixa_detail_response(
                 "tipo": tipo.upper(),
                 "movimento": movement,
                 "cliente": str(tx.get("pessoa") or "").strip(),
+                "operador": str(tx.get("operador_id") or "").strip(),
             }
         )
 
@@ -828,9 +829,10 @@ def _build_caixa_detail_response(
             if i > 0:
                 lines.append("--------------------------------")
             lines.append(f"ID: #{row['tx_id']}  |  {row['data_fmt']}")
-            lines.append(f"Tipo:    {row['tipo']}")
-            lines.append(f"Cliente: {row['cliente'][:40] if row['cliente'] else '—'}")
-            lines.append(f"Valor:   {_format_caixa_movement(currency_up, cast(Decimal, row['movimento']))}")
+            lines.append(f"Tipo:     {row['tipo']}")
+            lines.append(f"Cliente:  {row['cliente'][:40] if row['cliente'] else '—'}")
+            lines.append(f"Operador: {row['operador'][:40] if row['operador'] else '—'}")
+            lines.append(f"Valor:    {_format_caixa_movement(currency_up, cast(Decimal, row['movimento']))}")
     else:
         lines.append("Nenhuma movimentacao neste periodo.")
 
