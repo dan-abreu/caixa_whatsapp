@@ -347,6 +347,174 @@ def _sanitize_nome(value: str) -> str:
     return cleaned[:80]
 
 
+def _parse_operation_id(raw: str) -> Optional[int]:
+    text = raw.strip().lower()
+    match_op = re.search(r"op-\d{8}-(\d+)", text)
+    if match_op:
+        return int(match_op.group(1))
+
+    match_num = re.search(r"\b(\d{1,12})\b", text)
+    if match_num:
+        return int(match_num.group(1))
+    return None
+
+
+def _normalize_edit_field(raw: str) -> Optional[str]:
+    field = _normalize_text(raw)
+    aliases = {
+        "preco": "cotacao_usada",
+        "preço": "cotacao_usada",
+        "cotacao": "cotacao_usada",
+        "cotacao_usada": "cotacao_usada",
+        "quantidade": "quantidade",
+        "qtd": "quantidade",
+        "moeda": "moeda_liquidacao",
+        "moeda_liquidacao": "moeda_liquidacao",
+        "valor_moeda": "valor_moeda",
+        "cambio": "cambio_para_usd",
+        "câmbio": "cambio_para_usd",
+        "cambio_para_usd": "cambio_para_usd",
+    }
+    return aliases.get(field)
+
+
+def _try_handle_whatsapp_commands(
+    db: DatabaseClient,
+    usuario: Dict[str, Any],
+    remetente: str,
+    mensagem: str,
+) -> Optional[Dict[str, Any]]:
+    text = mensagem.strip()
+
+    # editar 123 preco 110
+    edit_match = re.match(r"^\s*(editar|edit)\s+(.+?)\s+([\w_çÇãÃâÂáÁéÉíÍóÓúÚ]+)\s+(.+?)\s*$", text, re.IGNORECASE)
+    if edit_match:
+        op_token = edit_match.group(2)
+        field_token = edit_match.group(3)
+        value_token = edit_match.group(4)
+
+        op_id = _parse_operation_id(op_token)
+        if op_id is None:
+            return {"mensagem": "ID inválido. Exemplo: editar 123 preco 110", "dados": {"acao": "editar_operacao"}}
+
+        transacao_resp = (
+            db.client.table("transacoes")
+            .select("id,operador_id,quantidade,cotacao_usada,valor_total,moeda_liquidacao,valor_moeda,cambio_para_usd,status")
+            .eq("id", op_id)
+            .limit(1)
+            .execute()
+        )
+        rows = cast(List[Dict[str, Any]], transacao_resp.data or [])
+        if not rows:
+            return {"mensagem": f"Operação {op_id} não encontrada.", "dados": {"acao": "editar_operacao"}}
+
+        row = rows[0]
+        is_admin = str(usuario.get("tipo_usuario", "")).lower() == "admin"
+        if not is_admin and str(row.get("operador_id", "")) != remetente:
+            return {
+                "mensagem": "Você não tem permissão para editar esta operação.",
+                "dados": {"acao": "editar_operacao", "permitido": False},
+            }
+
+        field = _normalize_edit_field(field_token)
+        if field is None:
+            return {
+                "mensagem": "Campo inválido. Use: preco, quantidade, moeda, valor_moeda ou cambio.",
+                "dados": {"acao": "editar_operacao"},
+            }
+
+        update_payload: Dict[str, Any] = {}
+
+        quantidade = Decimal(str(row.get("quantidade", "0")))
+        cotacao = Decimal(str(row.get("cotacao_usada", "0")))
+        moeda = str(row.get("moeda_liquidacao") or "USD").upper()
+        valor_moeda = Decimal(str(row.get("valor_moeda") or row.get("valor_total") or "0"))
+        cambio = Decimal(str(row.get("cambio_para_usd") or "1"))
+
+        if field in {"quantidade", "cotacao_usada", "valor_moeda", "cambio_para_usd"}:
+            novo = _parse_decimal_from_text(value_token, field)
+            if field in {"quantidade", "cotacao_usada", "cambio_para_usd"} and novo <= 0:
+                return {"mensagem": f"Valor inválido para {field}.", "dados": {"acao": "editar_operacao"}}
+            if field == "valor_moeda" and novo < 0:
+                return {"mensagem": "valor_moeda não pode ser negativo.", "dados": {"acao": "editar_operacao"}}
+
+            if field == "quantidade":
+                quantidade = novo
+                update_payload["quantidade"] = str(novo)
+            elif field == "cotacao_usada":
+                cotacao = novo
+                update_payload["cotacao_usada"] = str(novo)
+            elif field == "valor_moeda":
+                valor_moeda = novo
+                update_payload["valor_moeda"] = str(novo)
+            elif field == "cambio_para_usd":
+                cambio = novo
+                update_payload["cambio_para_usd"] = str(novo)
+
+        elif field == "moeda_liquidacao":
+            nova_moeda = _normalize_text(value_token).upper()
+            if nova_moeda not in _MOEDAS_SUPORTADAS:
+                return {
+                    "mensagem": "Moeda inválida. Use: USD, EUR, SRD ou BRL.",
+                    "dados": {"acao": "editar_operacao"},
+                }
+            moeda = nova_moeda
+            update_payload["moeda_liquidacao"] = moeda
+
+        total_usd = money(quantidade * cotacao)
+        update_payload["valor_total"] = str(total_usd)
+
+        if moeda == "USD":
+            update_payload["moeda_liquidacao"] = "USD"
+            update_payload["cambio_para_usd"] = "1"
+            update_payload["valor_moeda"] = str(total_usd)
+        else:
+            if field != "valor_moeda":
+                valor_moeda = money(total_usd * cambio)
+            update_payload["valor_moeda"] = str(valor_moeda)
+            update_payload["cambio_para_usd"] = str(cambio)
+
+        db.client.table("transacoes").update(update_payload).eq("id", op_id).execute()
+        return {
+            "mensagem": f"✅ Operação {op_id} atualizada com sucesso.",
+            "dados": {"acao": "editar_operacao", "id": op_id, "campos": list(update_payload.keys())},
+        }
+
+    # cancelar 123
+    cancel_match = re.match(r"^\s*(cancelar|cancela|excluir|delete)\s+(.+?)\s*$", text, re.IGNORECASE)
+    if cancel_match:
+        op_id = _parse_operation_id(cancel_match.group(2))
+        if op_id is None:
+            return {"mensagem": "ID inválido. Exemplo: cancelar 123", "dados": {"acao": "cancelar_operacao"}}
+
+        transacao_resp = (
+            db.client.table("transacoes")
+            .select("id,operador_id,status")
+            .eq("id", op_id)
+            .limit(1)
+            .execute()
+        )
+        rows = cast(List[Dict[str, Any]], transacao_resp.data or [])
+        if not rows:
+            return {"mensagem": f"Operação {op_id} não encontrada.", "dados": {"acao": "cancelar_operacao"}}
+
+        row = rows[0]
+        is_admin = str(usuario.get("tipo_usuario", "")).lower() == "admin"
+        if not is_admin and str(row.get("operador_id", "")) != remetente:
+            return {
+                "mensagem": "Você não tem permissão para cancelar esta operação.",
+                "dados": {"acao": "cancelar_operacao", "permitido": False},
+            }
+
+        db.client.table("transacoes").update({"status": "cancelada"}).eq("id", op_id).execute()
+        return {
+            "mensagem": f"✅ Operação {op_id} cancelada com sucesso.",
+            "dados": {"acao": "cancelar_operacao", "id": op_id, "status": "cancelada"},
+        }
+
+    return None
+
+
 def _needs_name_onboarding(usuario: Dict[str, Any]) -> bool:
     nome = str(usuario.get("nome") or "").strip().lower()
     if not nome:
@@ -1576,6 +1744,10 @@ def _processar_webhook(
             "mensagem": "Oi! Antes de comecarmos, qual e o seu nome?",
             "dados": {"etapa": "await_nome_usuario"},
         }
+
+    command_response = _try_handle_whatsapp_commands(db, usuario, remetente, mensagem)
+    if command_response is not None:
+        return command_response
 
     try:
         raw_ai_data = extract_message_data(mensagem)
