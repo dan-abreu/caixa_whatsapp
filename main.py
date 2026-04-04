@@ -59,10 +59,11 @@ def get_db() -> DatabaseClient:
 def normalize_ativo_nome(raw: str) -> str:
     value = raw.strip().lower()
     aliases = {
-        "ouro": "Ouro 24k",
-        "ouro 24k": "Ouro 24k",
-        "grama": "Ouro 24k",
-        "gramas": "Ouro 24k",
+        "ouro": "Ouro",
+        "ouro 24k": "Ouro",
+        "ouro 18k": "Ouro",
+        "grama": "Ouro",
+        "gramas": "Ouro",
         "usd": "USD",
         "dolar": "USD",
         "dólar": "USD",
@@ -217,7 +218,7 @@ def menu() -> Dict[str, Any]:
 _ERROS_AMIGAVEIS: Dict[int, str] = {
     400: "Não entendi sua mensagem. Tente algo como: 'Comprei 2g de ouro' ou 'Taxa ouro 70.00'.",
     403: "Você não tem permissão para essa operação.",
-    404: "Ativo não encontrado. Os ativos disponíveis são: Ouro 24k, USD, EUR, SRD.",
+    404: "Ativo não encontrado. Os ativos disponíveis são: Ouro (por teor), USD, EUR, SRD.",
     500: "Erro interno, tente novamente em instantes.",
     502: "Serviço de IA indisponível no momento, tente novamente.",
 }
@@ -233,8 +234,6 @@ _MULTI_AGENT_AUTO_MIN_USD = Decimal(os.getenv("MULTI_AGENT_AUTO_MIN_USD", "500")
 _MULTI_AGENT_AUTO_MIN_WEIGHT_GRAMS = Decimal(os.getenv("MULTI_AGENT_AUTO_MIN_WEIGHT_GRAMS", "10"))
 _GUIDED_FLOW_STATES = {
     "await_origem",
-    "await_gold_type",
-    "await_quebra",
     "await_teor",
     "await_peso",
     "await_preco_usd",
@@ -366,9 +365,7 @@ def _format_resumo(contexto: Dict[str, Any]) -> str:
         "Resumo da operação:\n"
         f"- Tipo: {contexto.get('tipo_operacao')}\n"
         f"- Origem: {contexto.get('origem')}\n"
-        f"- Ouro: {contexto.get('gold_type')}\n"
-        f"- Quebra: {contexto.get('quebra', 'n/a')}\n"
-        f"- Teor: {contexto.get('teor')}%\n"
+        f"- Ouro por teor: {contexto.get('teor')}%\n"
         f"- Peso: {contexto.get('peso')}g\n"
         f"- Preço USD/g: {contexto.get('preco_usd')}\n"
         f"- Total operação USD: {contexto.get('total_usd')}\n"
@@ -502,32 +499,13 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
         if text not in {"balcao", "balcão", "fora"}:
             return {"mensagem": "A origem deve ser 'balcão' ou 'fora'.", "dados": {"etapa": estado}}
         contexto["origem"] = "balcao" if "balcao" in text or "balcão" in text else "fora"
-        _save_session(db, remetente, "await_gold_type", contexto)
-        return {"mensagem": "O ouro é fundido ou queimado?", "dados": {"etapa": "await_gold_type"}}
-
-    if estado == "await_gold_type":
-        if text not in {"fundido", "queimado"}:
-            return {"mensagem": "Informe 'fundido' ou 'queimado'.", "dados": {"etapa": estado}}
-        contexto["gold_type"] = text
-        if text == "queimado":
-            _save_session(db, remetente, "await_quebra", contexto)
-            return {"mensagem": "Qual a quebra (%)?", "dados": {"etapa": "await_quebra"}}
-        contexto["quebra"] = None
         _save_session(db, remetente, "await_teor", contexto)
-        return {"mensagem": "Qual o teor (%)? Ex.: 90", "dados": {"etapa": "await_teor"}}
-
-    if estado == "await_quebra":
-        quebra = _parse_decimal_from_text(mensagem, "quebra")
-        if quebra < 0 or quebra > 100:
-            return {"mensagem": "A quebra deve estar entre 0 e 100.", "dados": {"etapa": estado}}
-        contexto["quebra"] = str(money(quebra))
-        _save_session(db, remetente, "await_teor", contexto)
-        return {"mensagem": "Qual o teor (%)? Ex.: 90", "dados": {"etapa": "await_teor"}}
+        return {"mensagem": "Qual o teor do ouro em %? (0 a 99.99)", "dados": {"etapa": "await_teor"}}
 
     if estado == "await_teor":
         teor = _parse_decimal_from_text(mensagem, "teor")
-        if teor <= 0 or teor > 100:
-            return {"mensagem": "O teor deve estar entre 0 e 100.", "dados": {"etapa": estado}}
+        if teor < 0 or teor > Decimal("99.99"):
+            return {"mensagem": "O teor deve estar entre 0 e 99.99.", "dados": {"etapa": estado}}
         contexto["teor"] = str(money(teor))
         _save_session(db, remetente, "await_peso", contexto)
         return {"mensagem": "Quantas gramas?", "dados": {"etapa": "await_peso"}}
@@ -680,9 +658,11 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
             _clear_session(db, remetente)
             return {"mensagem": "Operação cancelada.", "dados": {"intencao": "fluxo_guiado_cancelado"}}
 
-        ativo = db.get_ativo_by_nome("Ouro 24k")
+        ativo = db.get_ativo_by_nome("Ouro")
         if not ativo:
-            raise HTTPException(status_code=404, detail="Ativo não encontrado: Ouro 24k")
+            ativo = db.get_ativo_by_nome("Ouro 24k")
+        if not ativo:
+            raise HTTPException(status_code=404, detail="Ativo não encontrado: Ouro")
 
         ativo_id = int(ativo["id"])
         peso = Decimal(str(contexto.get("peso")))
@@ -696,8 +676,8 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
         header_payload: Dict[str, Any] = {
             "tipo_operacao": str(contexto.get("tipo_operacao", "compra")),
             "origem": str(contexto.get("origem", "balcao")),
-            "gold_type": str(contexto.get("gold_type", "fundido")),
-            "quebra": contexto.get("quebra"),
+            "gold_type": "fundido",
+            "quebra": None,
             "teor": contexto.get("teor"),
             "peso": str(peso),
             "preco_usd": str(money(preco)),
@@ -757,7 +737,6 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
         review_transaction: Dict[str, Any] = {
             "tipo_operacao": str(contexto.get("tipo_operacao", "compra")),
             "origem": str(contexto.get("origem", "balcao")),
-            "gold_type": str(contexto.get("gold_type", "fundido")),
             "teor": contexto.get("teor"),
             "peso": str(peso),
             "preco_usd": str(money(preco)),
@@ -856,6 +835,7 @@ def _finish_transacao_simples(
     quantidade = Decimal(str(contexto["quantidade"]))
     tipo_operacao = str(contexto["tipo_operacao"])
     nome_ativo = str(contexto.get("nome_ativo", ""))
+    nome_ativo_display = "Ouro" if "ouro" in nome_ativo.lower() else nome_ativo
     source_msg_id = contexto.get("source_message_id")
     cotacao = Decimal(str(contexto["cotacao_usd"]))
     total_usd = money(Decimal(str(contexto["total_usd"])))
@@ -887,7 +867,7 @@ def _finish_transacao_simples(
     review_payload: Optional[Dict[str, Any]] = None
     review_transaction: Dict[str, Any] = {
         "tipo_operacao": tipo_operacao,
-        "ativo": nome_ativo,
+        "ativo": nome_ativo_display,
         "quantidade": str(quantidade),
         "peso": str(quantidade),
         "preco_usd": str(money(cotacao)),
@@ -936,7 +916,7 @@ def _finish_transacao_simples(
             f"📅 {data_fmt}\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"{tipo_icon} {tipo_operacao.upper()}\n"
-            f"Ativo: {nome_ativo}\n"
+            f"Ativo: {nome_ativo_display}\n"
             f"Qtd: {quantidade}g\n"
             f"Preço: ${money(cotacao)}/g\n"
             f"Total: ${total_usd} USD\n"
@@ -947,7 +927,7 @@ def _finish_transacao_simples(
         "dados": {
             "intencao": "registrar_operacao",
             "tipo_operacao": tipo_operacao,
-            "ativo": nome_ativo,
+            "ativo": nome_ativo_display,
             "operacao_id": op_id,
             "quantidade": str(quantidade),
             "cotacao_usada": str(money(cotacao)),
@@ -1452,7 +1432,7 @@ def _processar_webhook(
         tipo_operacao = infer_tipo_operacao(mensagem)
         valor_informado = ai_data.valor_informado
 
-        contexto = {
+        contexto: Dict[str, Any] = {
             "ativo_id": ativo_id,
             "nome_ativo": ativo["nome"],
             "quantidade": str(quantidade),
@@ -1519,7 +1499,6 @@ async def edit_operation(
     if not rows:
         raise HTTPException(status_code=404, detail=f"Operação não encontrada: {operation_id}")
 
-    row = rows[0]
     body = await request.json()
     
     # Allow editing: quantidade, cotacao_usada, moeda_liquidacao, valor_moeda

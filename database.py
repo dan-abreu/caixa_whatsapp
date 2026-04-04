@@ -34,7 +34,22 @@ class DatabaseClient:
             .execute()
         )
         data = cast(List[Dict[str, Any]], response.data or [])
-        return data[0] if data else None
+        if data:
+            return data[0]
+
+        # Compat: if app requests generic "Ouro", try matching legacy names like "Ouro 24k".
+        if nome.strip().lower() == "ouro":
+            fallback = (
+                self.client.table("ativos")
+                .select("id,nome,tipo")
+                .ilike("nome", "%ouro%")
+                .limit(1)
+                .execute()
+            )
+            fallback_data = cast(List[Dict[str, Any]], fallback.data or [])
+            return fallback_data[0] if fallback_data else None
+
+        return None
 
     def get_usuario_by_telefone(self, telefone: str) -> Optional[Dict[str, Any]]:
         response = (
@@ -434,7 +449,9 @@ class DatabaseClient:
           "1 USD = X moeda"  (SRD=38, BRL=5.20, EUR=0.877, USD=1.0)
         """
         try:
-            ouro = self.get_ativo_by_nome("Ouro 24k")
+            ouro = self.get_ativo_by_nome("Ouro")
+            if not ouro:
+                ouro = self.get_ativo_by_nome("Ouro 24k")
             ouro_id = int(ouro["id"]) if ouro else None
 
             t_resp = (

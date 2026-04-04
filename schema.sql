@@ -340,7 +340,7 @@ BEGIN
     ) THEN
         ALTER TABLE gold_transactions
             ADD CONSTRAINT chk_gold_transactions_teor
-            CHECK (teor > 0 AND teor <= 100);
+            CHECK (teor >= 0 AND teor <= 99.99);
     END IF;
 
     IF NOT EXISTS (
