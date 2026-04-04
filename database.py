@@ -74,6 +74,28 @@ class DatabaseClient:
         data = cast(List[Dict[str, Any]], response.data or [])
         return data[0] if data else None
 
+    def get_last_cambio_para_usd(self, moeda: str) -> Optional[Decimal]:
+        moeda_up = moeda.upper()
+        if moeda_up == "USD":
+            return Decimal("1")
+
+        try:
+            response = (
+                self.client.table("transacoes")
+                .select("cambio_para_usd")
+                .eq("moeda_liquidacao", moeda_up)
+                .not_.is_("cambio_para_usd", "null")
+                .order("data_hora", desc=True)
+                .limit(1)
+                .execute()
+            )
+            data = cast(List[Dict[str, Any]], response.data or [])
+            if not data:
+                return None
+            return Decimal(str(data[0].get("cambio_para_usd", "0")))
+        except Exception:
+            return None
+
     def insert_taxa_diaria(self, ativo_id: int, preco: Decimal, admin_id: str) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
             "ativo_id": ativo_id,

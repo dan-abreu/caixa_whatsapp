@@ -310,6 +310,25 @@ def _extract_moedas(value: str) -> List[str]:
     return found
 
 
+def _extract_caixa_currency(message: str) -> Optional[str]:
+    text = _normalize_text(message)
+    aliases = {
+        "usd": "USD",
+        "dolar": "USD",
+        "dolar americano": "USD",
+        "eur": "EUR",
+        "euro": "EUR",
+        "srd": "SRD",
+        "brl": "BRL",
+        "real": "BRL",
+        "reais": "BRL",
+    }
+    for token in re.split(r"[^a-zA-Z]+", text):
+        if token in aliases:
+            return aliases[token]
+    return None
+
+
 def _is_help_menu_request(message: str) -> bool:
     text = _normalize_text(message)
     keywords = [
@@ -530,7 +549,7 @@ def _build_whatsapp_checklist_menu() -> str:
         "[1] Registrar operacao\n"
         "- Exemplo: Comprei 2g de ouro a 105\n\n"
         "[2] Consultar caixa/extrato\n"
-        "- Exemplo: caixa\n\n"
+        "- Exemplo: caixa ou caixa eur\n\n"
         "[3] Atualizar taxa (admin)\n"
         "- Exemplo: Taxa USD 5.40\n\n"
         "[4] Editar operacao\n"
@@ -541,7 +560,7 @@ def _build_whatsapp_checklist_menu() -> str:
     )
 
 
-def _build_caixa_response(db: DatabaseClient) -> Dict[str, Any]:
+def _build_caixa_response(db: DatabaseClient, requested_currency: Optional[str] = None) -> Dict[str, Any]:
     day = _build_day_range(None)
     summary = db.get_daily_gold_summary(day["start"], day["end"])
     saldo = db.get_saldo_caixa()
@@ -571,12 +590,34 @@ def _build_caixa_response(db: DatabaseClient) -> Dict[str, Any]:
     ouro_val = Decimal(str(gold_gramas))
     sinal_ouro = "+" if ouro_val >= 0 else ""
 
-    resposta = (
-        f"CAIXA - {day['date']}\n"
-        f"Ouro em estoque: {sinal_ouro}{ouro_val:,.3f} g\n"
-        f"{moedas_txt}\n"
-        f"Operações hoje: {ops_hoje}"
-    )
+    if requested_currency:
+        moeda = requested_currency.upper()
+        saldo_moeda = Decimal(str(moedas.get(moeda, "0")))
+        cambio = db.get_last_cambio_para_usd(moeda)
+        if moeda == "USD":
+            saldo_usd = saldo_moeda
+            cambio_txt = "1 USD = 1 USD"
+        elif cambio and cambio > 0:
+            saldo_usd = money(saldo_moeda / cambio)
+            cambio_txt = f"1 USD = {money(cambio)} {moeda}"
+        else:
+            saldo_usd = Decimal("0")
+            cambio_txt = "Sem câmbio recente"
+
+        resposta = (
+            f"SUBCAIXA {moeda} - {day['date']}\n"
+            f"Saldo {moeda}: {saldo_moeda:,.2f}\n"
+            f"Referência USD: {saldo_usd:,.2f}\n"
+            f"Câmbio usado: {cambio_txt}\n"
+            f"Operações hoje: {ops_hoje}"
+        )
+    else:
+        resposta = (
+            f"CAIXA MULTIMOEDA - {day['date']}\n"
+            f"Ouro em estoque: {sinal_ouro}{ouro_val:,.3f} g\n"
+            f"{moedas_txt}\n"
+            f"Operações hoje: {ops_hoje}"
+        )
     return {
         "mensagem": resposta,
         "dados": {
@@ -586,6 +627,7 @@ def _build_caixa_response(db: DatabaseClient) -> Dict[str, Any]:
             "moedas": moedas,
             "ops_hoje": ops_hoje,
             "summary": summary,
+            "requested_currency": requested_currency,
         },
     }
 
@@ -1911,7 +1953,8 @@ def _processar_webhook(
         return response_payload
 
     if intencao == "consultar_relatorio":
-        response_payload = _build_caixa_response(db)
+        requested_currency = _extract_caixa_currency(mensagem)
+        response_payload = _build_caixa_response(db, requested_currency=requested_currency)
         resposta = response_payload["mensagem"]
         day = {"date": str(response_payload["dados"].get("date", ""))}
         db.save_conversation_session(
