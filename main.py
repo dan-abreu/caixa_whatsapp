@@ -222,9 +222,9 @@ _ERROS_AMIGAVEIS: Dict[int, str] = {
     401: "Acesso negado. Token invalido.",
     403: "Voce nao tem permissao para isso.",
     404: "Recurso nao encontrado. Digite 'menu' para ver as opcoes.",
-    422: "Faltou algum dado. Tente novamente com mensagem curta.",
-    500: "Tive um erro interno. Tente de novo em alguns segundos.",
-    502: "A IA nao respondeu agora. Tente de novo.",
+    422: "Dados incompletos. Tente com uma mensagem mais objetiva.",
+    500: "Erro interno. Tente novamente em alguns segundos.",
+    502: "O servico de IA nao respondeu. Tente novamente.",
 }
 
 # Fallback de idempotência para ambiente sem migração aplicada.
@@ -440,7 +440,7 @@ def _guided_try_back_command(
     if not target_state:
         return {
             "mensagem": (
-                "Para corrigir sem cancelar, use por exemplo: 'voltar peso', 'voltar preco' ou 'voltar teor'."
+                "Para corrigir sem cancelar, envie: 'voltar peso', 'voltar preco' ou 'voltar teor'."
             ),
             "dados": {"etapa": estado},
         }
@@ -449,7 +449,7 @@ def _guided_try_back_command(
     _save_session(db, remetente, target_state, novo_contexto)
     prompt = _guided_prompt_for_state(target_state, novo_contexto)
     return {
-        "mensagem": f"Ok, vamos corrigir essa parte.\n{prompt}",
+        "mensagem": f"Corrigindo esta etapa.\n{prompt}",
         "dados": {"etapa": target_state, "acao": "voltar_editar"},
     }
 
@@ -642,7 +642,7 @@ def _try_handle_whatsapp_commands(
             if field in {"quantidade", "cotacao_usada", "cambio_para_usd"} and novo <= 0:
                 return {"mensagem": f"Valor invalido para {field}.", "dados": {"acao": "editar_operacao"}}
             if field == "valor_moeda" and novo < 0:
-                return {"mensagem": "valor_moeda nao pode ser negativo.", "dados": {"acao": "editar_operacao"}}
+                return {"mensagem": "O valor da moeda nao pode ser negativo.", "dados": {"acao": "editar_operacao"}}
 
             if field == "quantidade":
                 quantidade = novo
@@ -1135,7 +1135,7 @@ def _format_resumo(contexto: Dict[str, Any]) -> str:
         f"10) Pagamentos:\n{linhas_pagamento_texto}\n"
         f"11) Total pago USD: {money(total_pago)}\n"
         f"12) Diferenca USD: {diferenca}\n"
-        "Se estiver certo, responda: sim. Para parar, responda: nao."
+        "Se estiver correto, responda: sim. Para cancelar, responda: nao."
     )
 
 
@@ -1370,8 +1370,8 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
         _save_session(db, remetente, "await_preco_moeda", contexto)
         return {
             "mensagem": (
-                "Qual caixa base para precificação?\n"
-                "Responda com: USD, EUR, SRD ou BRL"
+                "Moeda base para precificacao:\n"
+                "USD, EUR, SRD ou BRL"
             ),
             "dados": {"etapa": "await_preco_moeda"},
         }
@@ -1439,7 +1439,7 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
             "mensagem": (
                 f"Conversao feita: {preco_usd} USD/g.\n"
                 f"Total da operacao: {total} USD.\n"
-                "Agora diga as moedas de pagamento: USD, EUR, SRD, BRL"
+                "Informe as moedas de pagamento: USD, EUR, SRD, BRL"
             ),
             "dados": {"etapa": "await_moedas"},
         }
@@ -1456,8 +1456,8 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
         total_operacao = Decimal(str(contexto.get("total_usd", "0")))
         return {
             "mensagem": (
-                f"Total da operação: {money(total_operacao)} USD.\n"
-                f"Quanto será pago em {moedas[0]}?"
+                f"Total da operacao: {money(total_operacao)} USD.\n"
+                f"Quanto sera pago em {moedas[0]}?"
             ),
             "dados": {"etapa": "await_valor_moeda"},
         }
@@ -1532,7 +1532,7 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
             "mensagem": (
                 f"Total pago: {money(total_pago)} USD.\n"
                 f"Diferenca atual: {money(total_operacao - total_pago)} USD.\n"
-                "Agora informe as gramas fechadas."
+                "Informe as gramas fechadas."
             ),
             "dados": {"etapa": "await_fechamento_gramas"},
         }
@@ -1596,7 +1596,7 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
             "mensagem": (
                 f"Total pago: {money(total_pago)} USD.\n"
                 f"Diferenca atual: {money(total_operacao - total_pago)} USD.\n"
-                "Agora informe as gramas fechadas."
+                "Informe as gramas fechadas."
             ),
             "dados": {"etapa": "await_fechamento_gramas"},
         }
@@ -2574,7 +2574,7 @@ def _processar_webhook(
         }.get(tipo_operacao, "operação")
 
         return {
-            "mensagem": f"Qual o preco por grama em USD para essa {operacao_texto} de {quantidade}g?",
+            "mensagem": f"Informe o preco por grama em USD ({operacao_texto} de {quantidade}g).",
             "dados": {"etapa": "await_preco_simples"},
         }
 
