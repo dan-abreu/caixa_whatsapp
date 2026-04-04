@@ -1479,6 +1479,7 @@ def _advance_after_payment_exchange(
     total_pago = sum((Decimal(str(p["valor_usd"])) for p in pagamentos), Decimal("0"))
     contexto["total_pago_usd"] = str(money(total_pago))
     tipo_operacao_ctx = str(contexto.get("tipo_operacao", "compra"))
+    fx_notice = "\nObs: referência em USD estimada (sem câmbio explícito informado)." if contexto.get("fx_auto_assumido") else ""
 
     if tipo_operacao_ctx == "compra":
         peso_ctx = Decimal(str(contexto.get("peso", "0")))
@@ -1489,7 +1490,7 @@ def _advance_after_payment_exchange(
             "mensagem": (
                 f"Total pago: {money(total_pago)} USD.\n"
                 f"Diferença atual: {money(total_operacao - total_pago)} USD.\n"
-                "Nome do vendedor (de quem você comprou)?"
+                f"Nome do vendedor (de quem você comprou)?{fx_notice}"
             ),
             "dados": {"etapa": "await_pessoa"},
         }
@@ -1499,7 +1500,7 @@ def _advance_after_payment_exchange(
         "mensagem": (
             f"Total pago: {money(total_pago)} USD.\n"
             f"Diferença atual: {money(total_operacao - total_pago)} USD.\n"
-            "Informe as gramas fechadas."
+            f"Informe as gramas fechadas.{fx_notice}"
         ),
         "dados": {"etapa": "await_fechamento_gramas"},
     }
@@ -1665,7 +1666,7 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
                     f"Preco recebido: {money(preco)} {preco_moeda}/g.\n"
                     f"Total da operação: {total_moeda} {preco_moeda}.\n"
                     "Informe as moedas de pagamento: USD, EUR, SRD, BRL\n"
-                    "(o câmbio será pedido na etapa de pagamento)"
+                    "(o câmbio será pedido na etapa de pagamento, se necessário)"
                 ),
                 "dados": {"etapa": "await_moedas"},
             }
@@ -1798,6 +1799,20 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
             if preco_moeda != "USD" and str(moeda_atual).upper() == preco_moeda:
                 _try_set_total_usd_from_base_rate(contexto, cambio_pre_dec)
 
+            return _advance_after_payment_exchange(db, remetente, contexto, pagamentos)
+
+        # Se for a mesma moeda-base da precificação, tenta usar último câmbio conhecido
+        # para evitar pedir câmbio manual em operações diretas nessa moeda.
+        preco_moeda = str(contexto.get("preco_moeda", "USD")).upper()
+        if preco_moeda != "USD" and str(moeda_atual).upper() == preco_moeda:
+            cambio_auto = db.get_last_cambio_para_usd(preco_moeda)
+            cambio_auto_dec = Decimal(str(cambio_auto)) if (cambio_auto and cambio_auto > 0) else Decimal("1")
+            contexto["fx_auto_assumido"] = not (cambio_auto and cambio_auto > 0)
+            valor_usd_auto = money(valor_moeda / cambio_auto_dec)
+            pagamentos[-1]["cambio_para_usd"] = str(cambio_auto_dec)
+            pagamentos[-1]["valor_usd"] = str(valor_usd_auto)
+            contexto["pagamentos"] = pagamentos
+            _try_set_total_usd_from_base_rate(contexto, cambio_auto_dec)
             return _advance_after_payment_exchange(db, remetente, contexto, pagamentos)
 
         # Câmbio de moeda não-USD sempre é pedido na etapa de pagamento.

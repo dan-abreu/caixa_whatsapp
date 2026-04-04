@@ -166,6 +166,7 @@ class DatabaseClient:
             return Decimal("1")
 
         try:
+            # 1) Legacy/simple flow source
             response = (
                 self.client.table("transacoes")
                 .select("cambio_para_usd")
@@ -176,9 +177,44 @@ class DatabaseClient:
                 .execute()
             )
             data = cast(List[Dict[str, Any]], response.data or [])
-            if not data:
-                return None
-            return Decimal(str(data[0].get("cambio_para_usd", "0")))
+            if data:
+                val = Decimal(str(data[0].get("cambio_para_usd", "0")))
+                if val > 0:
+                    return val
+
+            # 2) Enterprise payments source
+            gp_resp = (
+                self.client.table("gold_payments")
+                .select("cambio_para_usd")
+                .eq("moeda", moeda_up)
+                .not_.is_("cambio_para_usd", "null")
+                .order("id", desc=True)
+                .limit(1)
+                .execute()
+            )
+            gp_data = cast(List[Dict[str, Any]], gp_resp.data or [])
+            if gp_data:
+                val = Decimal(str(gp_data[0].get("cambio_para_usd", "0")))
+                if val > 0:
+                    return val
+
+            # 3) Dedicated FX snapshot source
+            fx_resp = (
+                self.client.table("fx_rates")
+                .select("rate")
+                .eq("base_currency", "USD")
+                .eq("quote_currency", moeda_up)
+                .order("captured_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+            fx_data = cast(List[Dict[str, Any]], fx_resp.data or [])
+            if fx_data:
+                val = Decimal(str(fx_data[0].get("rate", "0")))
+                if val > 0:
+                    return val
+
+            return None
         except Exception:
             return None
 
