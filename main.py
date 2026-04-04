@@ -383,10 +383,14 @@ def _format_resumo(contexto: Dict[str, Any]) -> str:
 
 
 def _build_day_range(date_str: Optional[str]) -> Dict[str, str]:
+    # Use TZ_OFFSET_HOURS to convert UTC "now" to local date (default: Brazil UTC-3)
+    tz_offset_hours = int(os.getenv("TZ_OFFSET_HOURS", "-3"))
     if date_str:
         base_date = datetime.strptime(date_str, "%Y-%m-%d").date()
     else:
-        base_date = datetime.now(timezone.utc).date()
+        utc_now = datetime.now(timezone.utc)
+        local_now = utc_now + timedelta(hours=tz_offset_hours)
+        base_date = local_now.date()
 
     start_dt = datetime(base_date.year, base_date.month, base_date.day, tzinfo=timezone.utc)
     end_dt = start_dt + timedelta(days=1)
