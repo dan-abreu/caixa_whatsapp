@@ -6,6 +6,7 @@ from html import escape
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any, Dict, List, Optional, cast
+from urllib.parse import parse_qs
 
 from fastapi import FastAPI, Header, HTTPException, Request, Response
 from pydantic import BaseModel, Field, ValidationError, field_validator
@@ -981,6 +982,15 @@ async def whatsapp_webhook(
         except Exception:
             body_data = {}
 
+    # Fallback parser for form-urlencoded when request.form() is unavailable.
+    if not body_data:
+        try:
+            raw = (await request.body()).decode("utf-8", errors="ignore")
+            parsed = parse_qs(raw)
+            body_data = {k: v[0] for k, v in parsed.items() if v}
+        except Exception:
+            body_data = {}
+
     try:
         payload = WhatsAppWebhookPayload(
             remetente=str(body_data.get("remetente") or body_data.get("From") or "").strip(),
@@ -1073,6 +1083,15 @@ async def whatsapp_webhook_twilio(
         body_data = dict(form)
     except Exception:
         body_data = {}
+
+    # Fallback parser for Twilio form-urlencoded payload.
+    if not body_data:
+        try:
+            raw = (await request.body()).decode("utf-8", errors="ignore")
+            parsed = parse_qs(raw)
+            body_data = {k: v[0] for k, v in parsed.items() if v}
+        except Exception:
+            body_data = {}
 
     token = x_webhook_token or request.query_params.get("token") or body_data.get("token")
     provider_message_id = (
