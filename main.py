@@ -248,6 +248,7 @@ _GUIDED_FLOW_STATES = {
     "await_teor",
     "await_peso",
     "await_preco_usd",
+    "await_preco_cambio",
     "await_moedas",
     "await_valor_moeda",
     "await_cambio_moeda",
@@ -928,19 +929,65 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
             return {"mensagem": "O peso deve ser maior que zero.", "dados": {"etapa": estado}}
         contexto["peso"] = str(peso)
         _save_session(db, remetente, "await_preco_usd", contexto)
-        return {"mensagem": "Qual o preço por grama em USD?", "dados": {"etapa": "await_preco_usd"}}
+        return {
+            "mensagem": (
+                "Qual o preço por grama?\n"
+                "Você pode informar em USD ou EUR. Ex.: '115 USD' ou '105 EUR'."
+            ),
+            "dados": {"etapa": "await_preco_usd"},
+        }
 
     if estado == "await_preco_usd":
         preco = _parse_decimal_from_text(mensagem, "preco_usd")
         if preco <= 0:
             return {"mensagem": "O preço deve ser maior que zero.", "dados": {"etapa": estado}}
+
+        preco_text = _normalize_text(mensagem)
+        if "eur" in preco_text or "euro" in preco_text:
+            contexto["preco_moeda"] = "EUR"
+            contexto["preco_moeda_valor"] = str(money(preco))
+            _save_session(db, remetente, "await_preco_cambio", contexto)
+            return {
+                "mensagem": (
+                    f"Preço recebido: {money(preco)} EUR/g.\n"
+                    "Informe o câmbio para converter para USD (1 USD = quantos EUR?)."
+                ),
+                "dados": {"etapa": "await_preco_cambio"},
+            }
+
         peso = Decimal(str(contexto.get("peso")))
         total = money(peso * preco)
         contexto["preco_usd"] = str(money(preco))
         contexto["total_usd"] = str(total)
         _save_session(db, remetente, "await_moedas", contexto)
         return {
-            "mensagem": "Pagamento em quais moedas? (USD, SRD, EUR, BRL, em qualquer combinação)",
+            "mensagem": (
+                f"Cálculo parcial: {peso}g x {money(preco)} USD = {total} USD.\n"
+                "Pagamento em quais moedas? (USD, EUR, SRD, BRL)"
+            ),
+            "dados": {"etapa": "await_moedas"},
+        }
+
+    if estado == "await_preco_cambio":
+        cambio = _parse_decimal_from_text(mensagem, "cambio_preco")
+        if cambio <= 0:
+            return {"mensagem": "O câmbio deve ser maior que zero.", "dados": {"etapa": estado}}
+
+        preco_eur = Decimal(str(contexto.get("preco_moeda_valor", "0")))
+        preco_usd = money(preco_eur / cambio)
+        peso = Decimal(str(contexto.get("peso")))
+        total = money(peso * preco_usd)
+
+        contexto["preco_usd"] = str(preco_usd)
+        contexto["cambio_preco_eur"] = str(money(cambio))
+        contexto["total_usd"] = str(total)
+        _save_session(db, remetente, "await_moedas", contexto)
+        return {
+            "mensagem": (
+                f"Conversão: {money(preco_eur)} EUR/g ÷ {money(cambio)} = {preco_usd} USD/g.\n"
+                f"Total da operação: {peso}g x {preco_usd} = {total} USD.\n"
+                "Pagamento em quais moedas? (USD, EUR, SRD, BRL)"
+            ),
             "dados": {"etapa": "await_moedas"},
         }
 
@@ -953,7 +1000,14 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
         contexto["pagamentos"] = []
         contexto["moeda_atual"] = moedas[0]
         _save_session(db, remetente, "await_valor_moeda", contexto)
-        return {"mensagem": f"Quanto será pago em {moedas[0]}?", "dados": {"etapa": "await_valor_moeda"}}
+        total_operacao = Decimal(str(contexto.get("total_usd", "0")))
+        return {
+            "mensagem": (
+                f"Total da operação: {money(total_operacao)} USD.\n"
+                f"Quanto será pago em {moedas[0]}?"
+            ),
+            "dados": {"etapa": "await_valor_moeda"},
+        }
 
     if estado == "await_valor_moeda":
         moeda_atual = str(contexto.get("moeda_atual"))
@@ -971,25 +1025,46 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
         pagamentos.append(pagamento)
         contexto["pagamentos"] = pagamentos
 
+        total_operacao = Decimal(str(contexto.get("total_usd", "0")))
+
         if moeda_atual != "USD":
             _save_session(db, remetente, "await_cambio_moeda", contexto)
             return {
-                "mensagem": f"Qual o câmbio do {moeda_atual} para USD?",
+                "mensagem": (
+                    f"Registrado: {money(valor_moeda)} {moeda_atual}.\n"
+                    f"Total da operação: {money(total_operacao)} USD.\n"
+                    f"Qual o câmbio do {moeda_atual} para USD? (1 USD = quantos {moeda_atual})"
+                ),
                 "dados": {"etapa": "await_cambio_moeda"},
             }
 
         moedas = list(contexto.get("moedas", []))
         idx = int(contexto.get("moeda_index", 0)) + 1
+
+        total_pago_parcial = sum((Decimal(str(p["valor_usd"])) for p in pagamentos), Decimal("0"))
+        restante = money(total_operacao - total_pago_parcial)
         if idx < len(moedas):
             contexto["moeda_index"] = idx
             contexto["moeda_atual"] = moedas[idx]
             _save_session(db, remetente, "await_valor_moeda", contexto)
-            return {"mensagem": f"Quanto será pago em {moedas[idx]}?", "dados": {"etapa": "await_valor_moeda"}}
+            return {
+                "mensagem": (
+                    f"Parcial pago: {money(total_pago_parcial)} USD. Restante: {restante} USD.\n"
+                    f"Quanto será pago em {moedas[idx]}?"
+                ),
+                "dados": {"etapa": "await_valor_moeda"},
+            }
 
         total_pago = sum((Decimal(str(p["valor_usd"])) for p in pagamentos), Decimal("0"))
         contexto["total_pago_usd"] = str(money(total_pago))
         _save_session(db, remetente, "await_fechamento_gramas", contexto)
-        return {"mensagem": "Quantas gramas foram fechadas?", "dados": {"etapa": "await_fechamento_gramas"}}
+        return {
+            "mensagem": (
+                f"Total pago: {money(total_pago)} USD. Diferença atual: {money(total_operacao - total_pago)} USD.\n"
+                "Quantas gramas foram fechadas?"
+            ),
+            "dados": {"etapa": "await_fechamento_gramas"},
+        }
 
     if estado == "await_cambio_moeda":
         cambio = _parse_decimal_from_text(mensagem, "cambio")
@@ -1008,18 +1083,34 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
         pagamentos[-1] = ultimo
         contexto["pagamentos"] = pagamentos
 
+        total_operacao = Decimal(str(contexto.get("total_usd", "0")))
+
         moedas = list(contexto.get("moedas", []))
         idx = int(contexto.get("moeda_index", 0)) + 1
+        total_pago_parcial = sum((Decimal(str(p["valor_usd"])) for p in pagamentos), Decimal("0"))
+        restante = money(total_operacao - total_pago_parcial)
         if idx < len(moedas):
             contexto["moeda_index"] = idx
             contexto["moeda_atual"] = moedas[idx]
             _save_session(db, remetente, "await_valor_moeda", contexto)
-            return {"mensagem": f"Quanto será pago em {moedas[idx]}?", "dados": {"etapa": "await_valor_moeda"}}
+            return {
+                "mensagem": (
+                    f"Parcial pago: {money(total_pago_parcial)} USD. Restante: {restante} USD.\n"
+                    f"Quanto será pago em {moedas[idx]}?"
+                ),
+                "dados": {"etapa": "await_valor_moeda"},
+            }
 
         total_pago = sum((Decimal(str(p["valor_usd"])) for p in pagamentos), Decimal("0"))
         contexto["total_pago_usd"] = str(money(total_pago))
         _save_session(db, remetente, "await_fechamento_gramas", contexto)
-        return {"mensagem": "Quantas gramas foram fechadas?", "dados": {"etapa": "await_fechamento_gramas"}}
+        return {
+            "mensagem": (
+                f"Total pago: {money(total_pago)} USD. Diferença atual: {money(total_operacao - total_pago)} USD.\n"
+                "Quantas gramas foram fechadas?"
+            ),
+            "dados": {"etapa": "await_fechamento_gramas"},
+        }
 
     if estado == "await_fechamento_gramas":
         fechamento = _parse_decimal_from_text(mensagem, "fechamento_gramas")
