@@ -2,6 +2,7 @@ import os
 import logging
 import re
 import unicodedata
+from html import escape
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any, Dict, List, Optional, cast
@@ -103,6 +104,12 @@ def validate_webhook_token(token: Optional[str]) -> None:
         raise HTTPException(status_code=500, detail="WEBHOOK_TOKEN não configurado no ambiente.")
     if token != expected:
         raise HTTPException(status_code=401, detail="Webhook token inválido.")
+
+
+def _twiml_message(text: str) -> Response:
+    safe_text = escape(text)
+    xml = f'<?xml version="1.0" encoding="UTF-8"?><Response><Message>{safe_text}</Message></Response>'
+    return Response(content=xml, media_type="application/xml")
 
 
 @app.get("/health")
@@ -1036,7 +1043,7 @@ async def whatsapp_webhook(
             )
             _IDEMPOTENCY_CACHE[provider_message_id] = response
         return response
-    except Exception as exc:
+    except Exception:
         logger.exception("Erro inesperado no webhook")
         response = {
             "mensagem": "⚠️ Ocorreu um erro inesperado. Tente novamente.",
@@ -1052,6 +1059,81 @@ async def whatsapp_webhook(
             )
             _IDEMPOTENCY_CACHE[provider_message_id] = response
         return response
+
+
+@app.post("/webhook/twilio")
+async def whatsapp_webhook_twilio(
+    request: Request,
+    x_webhook_token: Optional[str] = Header(default=None, alias="X-Webhook-Token"),
+    x_twilio_message_sid: Optional[str] = Header(default=None, alias="X-Twilio-MessageSid"),
+) -> Response:
+    body_data: Dict[str, Any] = {}
+    try:
+        form = await request.form()
+        body_data = dict(form)
+    except Exception:
+        body_data = {}
+
+    token = x_webhook_token or request.query_params.get("token") or body_data.get("token")
+    provider_message_id = (
+        x_twilio_message_sid
+        or str(body_data.get("MessageSid") or "").strip()
+        or None
+    )
+
+    remetente = str(body_data.get("From") or "").strip().replace("whatsapp:", "")
+    mensagem = str(body_data.get("Body") or "").strip()
+
+    if not remetente or not mensagem:
+        return _twiml_message("⚠️ Payload inválido: informe remetente e mensagem.")
+
+    payload = WhatsAppWebhookPayload(remetente=remetente, mensagem=mensagem)
+    db: Optional[DatabaseClient] = None
+
+    try:
+        validate_webhook_token(str(token) if token is not None else None)
+        db = get_db()
+
+        if provider_message_id:
+            existing = db.get_processed_message(provider_message_id)
+            if existing and isinstance(existing.get("resposta_payload"), dict):
+                return _twiml_message(str(existing["resposta_payload"].get("mensagem") or ""))
+            cached = _IDEMPOTENCY_CACHE.get(provider_message_id)
+            if cached:
+                return _twiml_message(str(cached.get("mensagem") or ""))
+
+        response = _processar_webhook(payload, db, provider_message_id)
+
+        if db and provider_message_id:
+            db.save_processed_message(
+                provider_message_id=provider_message_id,
+                remetente=remetente,
+                mensagem_recebida=mensagem,
+                resposta_payload=response,
+                status_code=200,
+            )
+            _IDEMPOTENCY_CACHE[provider_message_id] = response
+
+        return _twiml_message(str(response.get("mensagem") or "Operação processada."))
+    except HTTPException as exc:
+        msg = _ERROS_AMIGAVEIS.get(exc.status_code, str(exc.detail))
+        response_payload: Dict[str, Any] = {
+            "mensagem": f"⚠️ {msg}",
+            "dados": {"erro": exc.status_code, "detalhe": exc.detail},
+        }
+        if db and provider_message_id:
+            db.save_processed_message(
+                provider_message_id=provider_message_id,
+                remetente=remetente,
+                mensagem_recebida=mensagem,
+                resposta_payload=response_payload,
+                status_code=exc.status_code,
+            )
+            _IDEMPOTENCY_CACHE[provider_message_id] = response_payload
+        return _twiml_message(response_payload["mensagem"])
+    except Exception:
+        logger.exception("Erro inesperado no webhook Twilio")
+        return _twiml_message("⚠️ Ocorreu um erro inesperado. Tente novamente.")
 
 
 @app.get("/reports/daily-closure")
