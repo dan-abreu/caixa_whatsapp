@@ -325,7 +325,7 @@ def _guided_prompt_for_state(state: str, contexto: Dict[str, Any]) -> str:
         moeda_atual = str(contexto.get("moeda_atual") or "a moeda")
         return f"Passo 7: qual o cambio do {moeda_atual} para USD?"
     if state == "await_fechamento_gramas":
-        return "Passo 8: quantas gramas foram fechadas?"
+        return "Passo 8: quantas gramas foram fechadas? (use quando for venda/cambio)"
     if state == "await_fechamento_tipo":
         return "Passo 9: fechamento total ou parcial?"
     if state == "await_pessoa":
@@ -956,6 +956,13 @@ def _format_resumo(contexto: Dict[str, Any]) -> str:
     diferenca = money(total_operacao - total_pago)
     linhas_pagamento_texto = "\n".join(linhas_pagamento) if linhas_pagamento else "- Sem pagamentos informados"
 
+    tipo_operacao = str(contexto.get("tipo_operacao") or "")
+    fechamento_linha = (
+        f"7) Fechamento: {contexto.get('fechamento_gramas')}g ({contexto.get('fechamento_tipo')})\n"
+        if tipo_operacao != "compra"
+        else "7) Fechamento: automatico na compra (igual ao peso)\n"
+    )
+
     return (
         "RESUMO FINAL\n"
         f"1) Tipo: {contexto.get('tipo_operacao')}\n"
@@ -964,7 +971,7 @@ def _format_resumo(contexto: Dict[str, Any]) -> str:
         f"4) Peso: {contexto.get('peso')}g\n"
         f"5) Preco USD/g: {contexto.get('preco_usd')}\n"
         f"6) Total USD: {contexto.get('total_usd')}\n"
-        f"7) Fechamento: {contexto.get('fechamento_gramas')}g ({contexto.get('fechamento_tipo')})\n"
+        f"{fechamento_linha}"
         f"8) Pessoa: {contexto.get('pessoa')}\n"
         f"9) Forma: {contexto.get('forma_pagamento')}\n"
         f"10) Pagamentos:\n{linhas_pagamento_texto}\n"
@@ -1303,6 +1310,23 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
 
         total_pago = sum((Decimal(str(p["valor_usd"])) for p in pagamentos), Decimal("0"))
         contexto["total_pago_usd"] = str(money(total_pago))
+
+        tipo_operacao_ctx = str(contexto.get("tipo_operacao", "compra"))
+        if tipo_operacao_ctx == "compra":
+            peso_ctx = Decimal(str(contexto.get("peso", "0")))
+            contexto["fechamento_gramas"] = str(money(peso_ctx))
+            contexto["fechamento_tipo"] = "total"
+            _save_session(db, remetente, "await_pessoa", contexto)
+            return {
+                "mensagem": (
+                    f"Total pago: {money(total_pago)} USD.\n"
+                    f"Diferenca atual: {money(total_operacao - total_pago)} USD.\n"
+                    "Compra: fechamento automatico aplicado.\n"
+                    "Agora informe o nome da pessoa."
+                ),
+                "dados": {"etapa": "await_pessoa"},
+            }
+
         _save_session(db, remetente, "await_fechamento_gramas", contexto)
         return {
             "mensagem": (
@@ -1350,6 +1374,23 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
 
         total_pago = sum((Decimal(str(p["valor_usd"])) for p in pagamentos), Decimal("0"))
         contexto["total_pago_usd"] = str(money(total_pago))
+
+        tipo_operacao_ctx = str(contexto.get("tipo_operacao", "compra"))
+        if tipo_operacao_ctx == "compra":
+            peso_ctx = Decimal(str(contexto.get("peso", "0")))
+            contexto["fechamento_gramas"] = str(money(peso_ctx))
+            contexto["fechamento_tipo"] = "total"
+            _save_session(db, remetente, "await_pessoa", contexto)
+            return {
+                "mensagem": (
+                    f"Total pago: {money(total_pago)} USD.\n"
+                    f"Diferenca atual: {money(total_operacao - total_pago)} USD.\n"
+                    "Compra: fechamento automatico aplicado.\n"
+                    "Agora informe o nome da pessoa."
+                ),
+                "dados": {"etapa": "await_pessoa"},
+            }
+
         _save_session(db, remetente, "await_fechamento_gramas", contexto)
         return {
             "mensagem": (
