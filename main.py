@@ -287,10 +287,75 @@ def _parse_decimal_from_text(value: str, field_name: str) -> Decimal:
 
 def _extract_confirmacao(value: str) -> Optional[bool]:
     text = _normalize_text(value)
-    if text in {"sim", "confirmar", "ok", "confirmo", "s"}:
+    if text in {"sim", "confirmar", "ok", "confirmo", "s", "1"}:
         return True
-    if text in {"nao", "não", "cancelar", "n", "cancela"}:
+    if text in {"nao", "não", "cancelar", "n", "cancela", "2"}:
         return False
+    return None
+
+
+def _navigation_hint() -> str:
+    return "\n\nDigite voltar para retornar ou cancelar para encerrar."
+
+
+def _parse_single_currency_choice(value: str) -> Optional[str]:
+    text = _normalize_text(value)
+    number_map = {"1": "USD", "2": "EUR", "3": "SRD", "4": "BRL"}
+    if text in number_map:
+        return number_map[text]
+
+    aliases = {
+        "usd": "USD",
+        "dolar": "USD",
+        "dolares": "USD",
+        "dolar americano": "USD",
+        "eur": "EUR",
+        "euro": "EUR",
+        "euros": "EUR",
+        "srd": "SRD",
+        "brl": "BRL",
+        "real": "BRL",
+        "reais": "BRL",
+    }
+    return aliases.get(text)
+
+
+def _parse_origem_choice(value: str) -> Optional[str]:
+    text = _normalize_text(value)
+    if text == "1":
+        return "balcao"
+    if text == "2":
+        return "fora"
+    if text in {"balcao", "balcão"}:
+        return "balcao"
+    if text == "fora":
+        return "fora"
+    return None
+
+
+def _parse_forma_pagamento_choice(value: str) -> Optional[str]:
+    text = _normalize_text(value)
+    number_map = {
+        "1": "dinheiro",
+        "2": "transferencia",
+        "3": "cheque",
+        "4": "misto",
+    }
+    if text in number_map:
+        return number_map[text]
+    if text in {"dinheiro", "transferencia", "cheque", "misto"}:
+        return text
+    return None
+
+
+def _parse_fechamento_tipo_choice(value: str) -> Optional[str]:
+    text = _normalize_text(value)
+    if text == "1":
+        return "total"
+    if text == "2":
+        return "parcial"
+    if text in {"total", "parcial"}:
+        return text
     return None
 
 
@@ -1191,7 +1256,13 @@ def _start_guided_flow_if_requested(
     }
     _save_session(db, remetente, "await_origem", contexto)
     return {
-        "mensagem": f"Iniciando registro de {tipo}.\nLocal da operação: balcão ou fora?",
+        "mensagem": (
+            f"Iniciando registro de {tipo}.\n"
+            "Local da operação:\n"
+            "1) balcão\n"
+            "2) fora"
+            f"{_navigation_hint()}"
+        ),
         "dados": {"intencao": "fluxo_guiado", "etapa": "await_origem"},
     }
 
@@ -1585,15 +1656,21 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
         }
 
     if estado == "await_menu_tipo_operacao":
-        if text not in {"compra", "venda"}:
+        tipo_escolhido = {"1": "compra", "2": "venda"}.get(text, text)
+        if tipo_escolhido not in {"compra", "venda"}:
             return {
-                "mensagem": "Tipo inválido. Digite somente: compra ou venda.",
+                "mensagem": (
+                    "Tipo inválido. Escolha uma opção:\n"
+                    "1) compra\n"
+                    "2) venda"
+                    f"{_navigation_hint()}"
+                ),
                 "dados": {"etapa": "await_menu_tipo_operacao"},
             }
 
         contexto.update(
             {
-                "tipo_operacao": text,
+                "tipo_operacao": tipo_escolhido,
                 "pagamentos": [],
                 "moedas": [],
                 "moeda_index": 0,
@@ -1602,14 +1679,29 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
         )
         _save_session(db, remetente, "await_origem", contexto)
         return {
-            "mensagem": f"Operação: {text}.\nLocal: balcão ou fora?",
+            "mensagem": (
+                f"Operação: {tipo_escolhido}.\n"
+                "Local da operação:\n"
+                "1) balcão\n"
+                "2) fora"
+                f"{_navigation_hint()}"
+            ),
             "dados": {"intencao": "fluxo_guiado", "etapa": "await_origem"},
         }
 
     if estado == "await_origem":
-        if text not in {"balcao", "balcão", "fora"}:
-            return {"mensagem": "Origem inválida. Digite: balcão ou fora.", "dados": {"etapa": estado}}
-        contexto["origem"] = "balcao" if "balcao" in text or "balcão" in text else "fora"
+        origem = _parse_origem_choice(mensagem)
+        if origem is None:
+            return {
+                "mensagem": (
+                    "Origem inválida. Escolha uma opção:\n"
+                    "1) balcão\n"
+                    "2) fora"
+                    f"{_navigation_hint()}"
+                ),
+                "dados": {"etapa": estado},
+            }
+        contexto["origem"] = origem
         _save_session(db, remetente, "await_teor", contexto)
         return {"mensagem": "Qual o teor do ouro em %? (0 a 99,99)", "dados": {"etapa": "await_teor"}}
 
@@ -1630,16 +1722,29 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
         return {
             "mensagem": (
                 "Moeda base para precificação:\n"
-                "USD, EUR, SRD ou BRL"
+                "1) USD\n"
+                "2) EUR\n"
+                "3) SRD\n"
+                "4) BRL\n"
+                "Você também pode digitar: dólar, euro, srd ou real."
+                f"{_navigation_hint()}"
             ),
             "dados": {"etapa": "await_preco_moeda"},
         }
 
     if estado == "await_preco_moeda":
-        moeda_preco = _normalize_text(mensagem).upper()
+        moeda_preco = _parse_single_currency_choice(mensagem)
         if moeda_preco not in _MOEDAS_SUPORTADAS:
             return {
-                "mensagem": "Moeda inválida. Escolha: USD, EUR, SRD ou BRL.",
+                "mensagem": (
+                    "Moeda inválida. Escolha uma opção:\n"
+                    "1) USD\n"
+                    "2) EUR\n"
+                    "3) SRD\n"
+                    "4) BRL\n"
+                    "Você também pode digitar: dólar, euro, srd ou real."
+                    f"{_navigation_hint()}"
+                ),
                 "dados": {"etapa": estado},
             }
         contexto["preco_moeda"] = moeda_preco
@@ -1880,9 +1985,18 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
         return {"mensagem": "Fechamento total ou parcial?", "dados": {"etapa": "await_fechamento_tipo"}}
 
     if estado == "await_fechamento_tipo":
-        if text not in {"total", "parcial"}:
-            return {"mensagem": "Digite 'total' ou 'parcial'.", "dados": {"etapa": estado}}
-        contexto["fechamento_tipo"] = text
+        fechamento_tipo = _parse_fechamento_tipo_choice(mensagem)
+        if fechamento_tipo is None:
+            return {
+                "mensagem": (
+                    "Escolha o tipo de fechamento:\n"
+                    "1) total\n"
+                    "2) parcial"
+                    f"{_navigation_hint()}"
+                ),
+                "dados": {"etapa": estado},
+            }
+        contexto["fechamento_tipo"] = fechamento_tipo
         _save_session(db, remetente, "await_pessoa", contexto)
         tipo_op_ft = str(contexto.get("tipo_operacao", "compra"))
         pergunta_pessoa = "Nome do vendedor (de quem você comprou)?" if tipo_op_ft == "compra" else "Nome do comprador?"
@@ -1893,12 +2007,32 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
             return {"mensagem": "Informe um nome válido.", "dados": {"etapa": estado}}
         contexto["pessoa"] = mensagem.strip()
         _save_session(db, remetente, "await_forma_pagamento", contexto)
-        return {"mensagem": "Como foi o pagamento? (dinheiro, transferência, cheque, misto)", "dados": {"etapa": "await_forma_pagamento"}}
+        return {
+            "mensagem": (
+                "Como foi o pagamento?\n"
+                "1) dinheiro\n"
+                "2) transferência\n"
+                "3) cheque\n"
+                "4) misto"
+                f"{_navigation_hint()}"
+            ),
+            "dados": {"etapa": "await_forma_pagamento"},
+        }
 
     if estado == "await_forma_pagamento":
-        forma = _normalize_text(mensagem)
-        if forma not in {"dinheiro", "transferencia", "cheque", "misto"}:
-            return {"mensagem": "Forma inválida. Use: dinheiro, transferência, cheque ou misto.", "dados": {"etapa": estado}}
+        forma = _parse_forma_pagamento_choice(mensagem)
+        if forma is None:
+            return {
+                "mensagem": (
+                    "Forma inválida. Escolha uma opção:\n"
+                    "1) dinheiro\n"
+                    "2) transferência\n"
+                    "3) cheque\n"
+                    "4) misto"
+                    f"{_navigation_hint()}"
+                ),
+                "dados": {"etapa": estado},
+            }
         contexto["forma_pagamento"] = forma
         pagamentos = list(contexto.get("pagamentos", []))
         for pagamento in pagamentos:
@@ -2089,11 +2223,19 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
         }
 
     if estado == "await_moeda_simples":
-        moeda = _normalize_text(mensagem).upper()
+        moeda = _parse_single_currency_choice(mensagem)
         _MOEDAS_VALIDAS = {"USD", "EUR", "SRD", "BRL"}
         if moeda not in _MOEDAS_VALIDAS:
             return {
-                "mensagem": "Moeda inválida. Use: USD, EUR, SRD ou BRL.",
+                "mensagem": (
+                    "Moeda inválida. Escolha uma opção:\n"
+                    "1) USD\n"
+                    "2) EUR\n"
+                    "3) SRD\n"
+                    "4) BRL\n"
+                    "Você também pode digitar: dólar, euro, srd ou real."
+                    f"{_navigation_hint()}"
+                ),
                 "dados": {"etapa": estado},
             }
         contexto["moeda_liquidacao"] = moeda
