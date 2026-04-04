@@ -254,6 +254,7 @@ _GUIDED_FLOW_STATES = {
     "await_cambio_base_para_total",
     "await_moedas",
     "await_valor_moeda",
+    "await_cambio_moeda_pre_valor",
     "await_cambio_moeda",
     "await_fechamento_gramas",
     "await_fechamento_tipo",
@@ -376,6 +377,9 @@ def _guided_prompt_for_state(state: str, contexto: Dict[str, Any]) -> str:
     if state == "await_valor_moeda":
         moeda_atual = str(contexto.get("moeda_atual") or "a moeda")
         return f"Passo 6: quanto será pago em {moeda_atual}?"
+    if state == "await_cambio_moeda_pre_valor":
+        moeda_atual = str(contexto.get("moeda_atual") or "a moeda")
+        return f"Passo 6.5: informe o câmbio de {moeda_atual} antes do valor ({_build_cambio_prompt(moeda_atual)})"
     if state == "await_cambio_moeda":
         moeda_atual = str(contexto.get("moeda_atual") or "a moeda")
         return f"Passo 7: informe o câmbio ({_build_cambio_prompt(moeda_atual)})"
@@ -402,6 +406,7 @@ def _guided_clear_from_step(contexto: Dict[str, Any], target_state: str) -> Dict
         "await_cambio_base_para_total",
         "await_moedas",
         "await_valor_moeda",
+        "await_cambio_moeda_pre_valor",
         "await_cambio_moeda",
         "await_fechamento_gramas",
         "await_fechamento_tipo",
@@ -417,6 +422,7 @@ def _guided_clear_from_step(contexto: Dict[str, Any], target_state: str) -> Dict
         "await_cambio_base_para_total": ["cambio_preco_moeda", "preco_usd", "total_usd"],
         "await_moedas": ["moedas", "moeda_index", "moeda_atual", "pagamentos", "total_pago_usd"],
         "await_valor_moeda": ["pagamentos", "total_pago_usd"],
+        "await_cambio_moeda_pre_valor": ["cambio_moeda_atual_pre", "pagamentos", "total_pago_usd"],
         "await_cambio_moeda": ["pagamentos", "total_pago_usd"],
         "await_fechamento_gramas": ["fechamento_gramas", "fechamento_tipo", "pessoa", "forma_pagamento", "observacoes"],
         "await_fechamento_tipo": ["fechamento_tipo", "pessoa", "forma_pagamento", "observacoes"],
@@ -460,6 +466,7 @@ def _guided_try_back_command(
         "pagamento": "await_valor_moeda",
         "valor": "await_valor_moeda",
         "cambio": "await_cambio_moeda",
+        "cambio moeda": "await_cambio_moeda_pre_valor",
         "fechamento": "await_fechamento_gramas",
         "pessoa": "await_pessoa",
         "nome": "await_pessoa",
@@ -482,6 +489,7 @@ def _guided_try_back_command(
             "await_cambio_base_para_total": "await_moedas",
             "await_moedas": "await_preco_usd",
             "await_valor_moeda": "await_moedas",
+            "await_cambio_moeda_pre_valor": "await_moedas",
             "await_cambio_moeda": "await_valor_moeda",
             "await_fechamento_gramas": "await_moedas",
             "await_fechamento_tipo": "await_fechamento_gramas",
@@ -1410,6 +1418,18 @@ def _advance_after_payment_exchange(
         if idx < len(moedas):
             contexto["moeda_index"] = idx
             contexto["moeda_atual"] = moedas[idx]
+            proxima_moeda = str(moedas[idx]).upper()
+            if proxima_moeda != "USD":
+                _save_session(db, remetente, "await_cambio_moeda_pre_valor", contexto)
+                return {
+                    "mensagem": (
+                        "Pagamento registrado.\n"
+                        "Ainda falta o câmbio da moeda-base para calcular o total em USD.\n"
+                        f"Antes do valor em {proxima_moeda}, informe o câmbio: {_build_cambio_prompt(proxima_moeda)}"
+                    ),
+                    "dados": {"etapa": "await_cambio_moeda_pre_valor"},
+                }
+
             _save_session(db, remetente, "await_valor_moeda", contexto)
             return {
                 "mensagem": (
@@ -1704,6 +1724,24 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
             "dados": {"etapa": "await_valor_moeda"},
         }
 
+    if estado == "await_cambio_moeda_pre_valor":
+        cambio = _parse_decimal_from_text(mensagem, "cambio_pre_valor")
+        if cambio <= 0:
+            return {"mensagem": "Câmbio deve ser maior que zero.", "dados": {"etapa": estado}}
+
+        moeda_atual = str(contexto.get("moeda_atual", "USD")).upper()
+        if moeda_atual == "USD":
+            _save_session(db, remetente, "await_valor_moeda", contexto)
+            return {"mensagem": "Quanto será pago em USD?", "dados": {"etapa": "await_valor_moeda"}}
+
+        cambio_normalizado = _normalize_cambio_para_usd(moeda_atual, cambio)
+        contexto["cambio_moeda_atual_pre"] = str(cambio_normalizado)
+        _save_session(db, remetente, "await_valor_moeda", contexto)
+        return {
+            "mensagem": f"Câmbio registrado para {moeda_atual}. Quanto será pago em {moeda_atual}?",
+            "dados": {"etapa": "await_valor_moeda"},
+        }
+
     if estado == "await_valor_moeda":
         moeda_atual = str(contexto.get("moeda_atual"))
         valor_moeda = _parse_decimal_from_text(mensagem, "valor_moeda")
@@ -1721,6 +1759,22 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
         contexto["pagamentos"] = pagamentos
 
         if moeda_atual == "USD":
+            contexto.pop("cambio_moeda_atual_pre", None)
+            return _advance_after_payment_exchange(db, remetente, contexto, pagamentos)
+
+        cambio_pre = contexto.get("cambio_moeda_atual_pre")
+        if cambio_pre:
+            cambio_pre_dec = Decimal(str(cambio_pre))
+            valor_usd_pre = money(valor_moeda / cambio_pre_dec)
+            pagamentos[-1]["cambio_para_usd"] = str(cambio_pre_dec)
+            pagamentos[-1]["valor_usd"] = str(valor_usd_pre)
+            contexto["pagamentos"] = pagamentos
+            contexto.pop("cambio_moeda_atual_pre", None)
+
+            preco_moeda = str(contexto.get("preco_moeda", "USD")).upper()
+            if preco_moeda != "USD" and str(moeda_atual).upper() == preco_moeda:
+                _try_set_total_usd_from_base_rate(contexto, cambio_pre_dec)
+
             return _advance_after_payment_exchange(db, remetente, contexto, pagamentos)
 
         # Câmbio de moeda não-USD sempre é pedido na etapa de pagamento.
