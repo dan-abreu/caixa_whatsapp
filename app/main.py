@@ -797,7 +797,7 @@ def _build_caixa_detail_response(
         try:
             dt = datetime.fromisoformat(raw_dt.replace("Z", "+00:00"))
             dt_local = dt + timedelta(hours=tz_offset_hours)
-            data_fmt = dt_local.strftime("%d/%m %H:%M")
+            data_fmt = dt_local.strftime("%d/%m/%Y %H:%M")
         except Exception:
             data_fmt = raw_dt[:16]
 
@@ -808,10 +808,11 @@ def _build_caixa_detail_response(
 
         movement_rows.append(
             {
+                "tx_id": str(tx.get("id") or "-"),
                 "data_fmt": data_fmt,
                 "tipo": tipo.upper(),
                 "movimento": movement,
-                "descricao": str(tx.get("pessoa") or tx.get("source") or "").strip(),
+                "cliente": str(tx.get("pessoa") or "").strip(),
             }
         )
 
@@ -823,14 +824,13 @@ def _build_caixa_detail_response(
     ]
 
     if movement_rows:
-        for row in movement_rows:
-            line = (
-                f"{row['data_fmt']} | {row['tipo']} | "
-                f"{_format_caixa_movement(currency_up, cast(Decimal, row['movimento']))}"
-            )
-            if row["descricao"]:
-                line += f" | {row['descricao'][:30]}"
-            lines.append(line)
+        for i, row in enumerate(movement_rows):
+            if i > 0:
+                lines.append("--------------------------------")
+            lines.append(f"ID: #{row['tx_id']}  |  {row['data_fmt']}")
+            lines.append(f"Tipo:    {row['tipo']}")
+            lines.append(f"Cliente: {row['cliente'][:40] if row['cliente'] else '—'}")
+            lines.append(f"Valor:   {_format_caixa_movement(currency_up, cast(Decimal, row['movimento']))}")
     else:
         lines.append("Nenhuma movimentacao neste periodo.")
 
@@ -838,10 +838,12 @@ def _build_caixa_detail_response(
         [
             "================================",
             f"Entradas: {_format_caixa_movement(currency_up, total_entries)}",
-            f"Saidas: {_format_caixa_movement(currency_up, -total_exits)}",
-            f"Saldo atual: {_format_caixa_movement(currency_up, saldo_atual)}",
+            f"Saidas:   {_format_caixa_movement(currency_up, -total_exits)}",
+            f"Saldo:    {_format_caixa_movement(currency_up, saldo_atual)}",
         ]
     )
+    if movement_rows:
+        lines.append(f"Ops:      {len(movement_rows)}")
 
     return {
         "mensagem": "\n".join(lines),
