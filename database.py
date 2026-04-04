@@ -1158,6 +1158,176 @@ class DatabaseClient:
         except Exception:
             return
 
+    def _calculate_caixas_from_history(self) -> Dict[str, Decimal]:
+        """Rebuild 5-caixas balances from legacy + enterprise transaction history."""
+        saldos: Dict[str, Decimal] = {
+            "XAU": Decimal("0"),
+            "EUR": Decimal("0"),
+            "USD": Decimal("0"),
+            "SRD": Decimal("0"),
+            "BRL": Decimal("0"),
+        }
+
+        ouro = self.get_ativo_by_nome("Ouro")
+        if not ouro:
+            ouro = self.get_ativo_by_nome("Ouro 24k")
+        ouro_id = int(ouro["id"]) if ouro else None
+
+        # 1) Legacy table: transacoes
+        try:
+            t_resp = (
+                self.client.table("transacoes")
+                .select("tipo_operacao,ativo_id,quantidade,moeda_liquidacao,valor_moeda,valor_total")
+                .execute()
+            )
+            t_rows = cast(List[Dict[str, Any]], t_resp.data or [])
+            for row in t_rows:
+                tipo = str(row.get("tipo_operacao", ""))
+                aid = int(row.get("ativo_id", 0))
+                qty = Decimal(str(row.get("quantidade", "0")))
+
+                if ouro_id is not None and aid == ouro_id:
+                    if tipo == "compra":
+                        saldos["XAU"] += qty
+                    elif tipo in ("venda", "cambio"):
+                        saldos["XAU"] -= qty
+
+                moeda = str(row.get("moeda_liquidacao") or "USD").upper()
+                valor_m_raw = row.get("valor_moeda")
+                if valor_m_raw is not None:
+                    valor_m = Decimal(str(valor_m_raw))
+                else:
+                    moeda = "USD"
+                    valor_m = Decimal(str(row.get("valor_total", "0")))
+
+                if moeda not in saldos:
+                    continue
+
+                if tipo == "venda":
+                    saldos[moeda] += valor_m
+                elif tipo == "compra":
+                    saldos[moeda] -= valor_m
+        except Exception:
+            pass
+
+        # 2) Enterprise table: gold_transactions + gold_payments
+        gt_tipo_map: Dict[int, str] = {}
+        gt_context_pagamentos: Dict[int, List[Dict[str, Any]]] = {}
+        try:
+            gt_resp = (
+                self.client.table("gold_transactions")
+                .select("id,tipo_operacao,peso,contexto")
+                .execute()
+            )
+            gt_rows = cast(List[Dict[str, Any]], gt_resp.data or [])
+
+            for row in gt_rows:
+                gid = int(row.get("id", 0))
+                tipo = str(row.get("tipo_operacao", ""))
+                gt_tipo_map[gid] = tipo
+
+                peso = Decimal(str(row.get("peso", "0")))
+                if tipo == "compra":
+                    saldos["XAU"] += peso
+                elif tipo in ("venda", "cambio"):
+                    saldos["XAU"] -= peso
+
+                contexto_raw = row.get("contexto")
+                if isinstance(contexto_raw, dict):
+                    pagamentos_ctx = contexto_raw.get("pagamentos")
+                    if isinstance(pagamentos_ctx, list):
+                        gt_context_pagamentos[gid] = [p for p in pagamentos_ctx if isinstance(p, dict)]
+        except Exception:
+            gt_tipo_map = {}
+            gt_context_pagamentos = {}
+
+        gp_tx_ids: set[int] = set()
+        try:
+            gp_resp = (
+                self.client.table("gold_payments")
+                .select("gold_transaction_id,moeda,valor_moeda")
+                .execute()
+            )
+            gp_rows = cast(List[Dict[str, Any]], gp_resp.data or [])
+
+            for row in gp_rows:
+                gid = int(row.get("gold_transaction_id", 0))
+                tipo = gt_tipo_map.get(gid, "compra")
+                moeda = str(row.get("moeda", "USD")).upper()
+                val = Decimal(str(row.get("valor_moeda", "0")))
+                gp_tx_ids.add(gid)
+
+                if moeda not in saldos:
+                    continue
+
+                if tipo == "venda":
+                    saldos[moeda] += val
+                elif tipo == "compra":
+                    saldos[moeda] -= val
+        except Exception:
+            gp_tx_ids = set()
+
+        # Fallback for guided transactions without rows in gold_payments
+        for gid, pagamentos in gt_context_pagamentos.items():
+            if gid in gp_tx_ids:
+                continue
+            tipo = gt_tipo_map.get(gid, "compra")
+            for pagamento in pagamentos:
+                moeda = str(pagamento.get("moeda", "USD")).upper()
+                val = Decimal(str(pagamento.get("valor_moeda", "0")))
+
+                if moeda not in saldos:
+                    continue
+
+                if tipo == "venda":
+                    saldos[moeda] += val
+                elif tipo == "compra":
+                    saldos[moeda] -= val
+
+        return saldos
+
+    def backfill_caixas_from_history(self, clear_movements: bool = False) -> Dict[str, Any]:
+        """One-time migration: recalculate caixas from full history and persist balances."""
+        self._ensure_caixas_exist()
+
+        current = self.get_saldo_caixa()
+        recalculated = self._calculate_caixas_from_history()
+
+        if clear_movements:
+            try:
+                self.client.table("caixas_movimentacoes").delete().neq("id", 0).execute()
+            except Exception:
+                pass
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        for moeda in ["XAU", "EUR", "USD", "SRD", "BRL"]:
+            saldo_anterior = Decimal(str(current.get(moeda, "0")))
+            saldo_novo = recalculated.get(moeda, Decimal("0"))
+
+            try:
+                self.client.table("caixas").update(
+                    {"saldo": str(saldo_novo), "atualizado_em": now_iso}
+                ).eq("moeda", moeda).execute()
+            except Exception:
+                continue
+
+            if saldo_anterior != saldo_novo:
+                self._record_caixa_movimentacao(
+                    caixa_moeda=moeda,
+                    tipo_operacao="ajuste",
+                    gold_transaction_id=None,
+                    valor=(saldo_novo - saldo_anterior),
+                    saldo_anterior=saldo_anterior,
+                    saldo_posterior=saldo_novo,
+                    descricao="Backfill histórico para novo sistema de 5 caixas",
+                    pessoa="sistema",
+                )
+
+        return {
+            "before": current,
+            "after": {k: str(v) for k, v in recalculated.items()},
+        }
+
     def update_caixas_from_transaction(
         self,
         gold_transaction_id: int,
