@@ -99,6 +99,10 @@ def money(value: Decimal) -> Decimal:
     return value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
+def fx_rate(value: Decimal) -> Decimal:
+    return value.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+
+
 def validate_webhook_token(token: Optional[str]) -> None:
     expected = os.getenv("WEBHOOK_TOKEN")
     if not expected:
@@ -310,6 +314,22 @@ def _extract_moedas(value: str) -> List[str]:
     return found
 
 
+def _build_cambio_prompt(moeda: str) -> str:
+    moeda_up = str(moeda or "USD").upper()
+    if moeda_up == "EUR":
+        return "1 EUR = quantos USD?"
+    return f"1 USD = quantos {moeda_up}?"
+
+
+def _normalize_cambio_para_usd(moeda: str, cambio_informado: Decimal) -> Decimal:
+    """Normalize user input to the internal format: quote_currency per 1 USD."""
+    moeda_up = str(moeda or "USD").upper()
+    if moeda_up == "EUR":
+        # User informs USD per EUR (strong -> weak), so invert to EUR per USD.
+        return fx_rate(Decimal("1") / cambio_informado)
+    return fx_rate(cambio_informado)
+
+
 def _guided_prompt_for_state(state: str, contexto: Dict[str, Any]) -> str:
     if state == "await_teor":
         return "Passo 1: qual o teor do ouro em %? Exemplo: 91,6"
@@ -318,7 +338,8 @@ def _guided_prompt_for_state(state: str, contexto: Dict[str, Any]) -> str:
     if state == "await_preco_usd":
         return "Passo 3: qual o preço por grama? Exemplo: 115 USD"
     if state == "await_preco_cambio":
-        return "Passo 4: informe o câmbio. Exemplo: 1 USD = 0,92 EUR"
+        moeda_preco = str(contexto.get("preco_moeda") or "EUR").upper()
+        return f"Passo 4: informe o câmbio. Exemplo: {_build_cambio_prompt(moeda_preco)}"
     if state == "await_moedas":
         return "Passo 5: em quais moedas foi pago? Use: USD, EUR, SRD, BRL"
     if state == "await_valor_moeda":
@@ -326,7 +347,7 @@ def _guided_prompt_for_state(state: str, contexto: Dict[str, Any]) -> str:
         return f"Passo 6: quanto será pago em {moeda_atual}?"
     if state == "await_cambio_moeda":
         moeda_atual = str(contexto.get("moeda_atual") or "a moeda")
-        return f"Passo 7: qual o câmbio do {moeda_atual} para USD?"
+        return f"Passo 7: informe o câmbio ({_build_cambio_prompt(moeda_atual)})"
     if state == "await_fechamento_gramas":
         return "Passo 8: quantas gramas foram fechadas? (use quando for venda/câmbio)"
     if state == "await_fechamento_tipo":
@@ -1467,7 +1488,7 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
             return {
                 "mensagem": (
                     f"Preco recebido: {money(preco)} {preco_moeda}/g.\n"
-                    f"Agora informe o cambio: 1 USD = quantos {preco_moeda}?"
+                    f"Agora informe o cambio: {_build_cambio_prompt(preco_moeda)}"
                 ),
                 "dados": {"etapa": "await_preco_cambio"},
             }
@@ -1491,13 +1512,14 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
             return {"mensagem": "Câmbio deve ser maior que zero.", "dados": {"etapa": estado}}
 
         preco_moeda = str(contexto.get("preco_moeda", "USD")).upper()
+        cambio_normalizado = _normalize_cambio_para_usd(preco_moeda, cambio)
         preco_moeda_valor = Decimal(str(contexto.get("preco_moeda_valor", "0")))
-        preco_usd = money(preco_moeda_valor / cambio)
+        preco_usd = money(preco_moeda_valor / cambio_normalizado)
         peso = Decimal(str(contexto.get("peso")))
         total = money(peso * preco_usd)
 
         contexto["preco_usd"] = str(preco_usd)
-        contexto["cambio_preco_moeda"] = str(money(cambio))
+        contexto["cambio_preco_moeda"] = str(cambio_normalizado)
         contexto["total_usd"] = str(total)
         _save_session(db, remetente, "await_moedas", contexto)
         return {
@@ -1565,7 +1587,7 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
             "mensagem": (
                 f"{moeda_atual}: {money(valor_moeda)} registrado.\n"
                 f"Total da operação: {money(total_operacao)} USD.\n"
-                f"Câmbio do {moeda_atual}: 1 USD = quantos {moeda_atual}?"
+                f"Câmbio do {moeda_atual}: {_build_cambio_prompt(moeda_atual)}"
             ),
             "dados": {"etapa": "await_cambio_moeda"},
         }
@@ -1580,9 +1602,11 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
             return {"mensagem": "Pagamentos reiniciados. Informe as moedas novamente.", "dados": {"etapa": "await_moedas"}}
 
         ultimo = dict(pagamentos[-1])
+        moeda_ult = str(ultimo.get("moeda", "USD")).upper()
+        cambio_normalizado = _normalize_cambio_para_usd(moeda_ult, cambio)
         valor_moeda_ult = Decimal(str(ultimo["valor_moeda"]))
-        valor_usd = money(valor_moeda_ult / cambio)
-        ultimo["cambio_para_usd"] = str(money(cambio))
+        valor_usd = money(valor_moeda_ult / cambio_normalizado)
+        ultimo["cambio_para_usd"] = str(cambio_normalizado)
         ultimo["valor_usd"] = str(valor_usd)
         pagamentos[-1] = ultimo
         contexto["pagamentos"] = pagamentos
