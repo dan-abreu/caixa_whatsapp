@@ -322,6 +322,8 @@ def _extract_caixa_currency(message: str) -> Optional[str]:
         "brl": "BRL",
         "real": "BRL",
         "reais": "BRL",
+        "xau": "XAU",
+        "ouro": "XAU",
     }
     for token in re.split(r"[^a-zA-Z]+", text):
         if token in aliases:
@@ -549,7 +551,7 @@ def _build_whatsapp_checklist_menu() -> str:
         "[1] Registrar operacao\n"
         "- Exemplo: Comprei 2g de ouro a 105\n\n"
         "[2] Consultar caixa/extrato\n"
-        "- Exemplo: caixa ou caixa eur\n\n"
+        "- Exemplo: caixa, caixa eur, caixa srd, caixa brl, caixa xau\n\n"
         "[3] Atualizar taxa (admin)\n"
         "- Exemplo: Taxa USD 5.40\n\n"
         "[4] Editar operacao\n"
@@ -592,25 +594,49 @@ def _build_caixa_response(db: DatabaseClient, requested_currency: Optional[str] 
 
     if requested_currency:
         moeda = requested_currency.upper()
-        saldo_moeda = Decimal(str(moedas.get(moeda, "0")))
-        cambio = db.get_last_cambio_para_usd(moeda)
-        if moeda == "USD":
-            saldo_usd = saldo_moeda
-            cambio_txt = "1 USD = 1 USD"
-        elif cambio and cambio > 0:
-            saldo_usd = money(saldo_moeda / cambio)
-            cambio_txt = f"1 USD = {money(cambio)} {moeda}"
-        else:
-            saldo_usd = Decimal("0")
-            cambio_txt = "Sem câmbio recente"
+        if moeda == "XAU":
+            ouro_gramas = Decimal(str(gold_gramas))
+            ativo_ouro = db.get_ativo_by_nome("Ouro") or db.get_ativo_by_nome("Ouro 24k")
+            taxa_ouro: Optional[Decimal] = None
+            if ativo_ouro:
+                taxa = db.get_taxa_atual(int(ativo_ouro["id"]))
+                if taxa:
+                    taxa_ouro = Decimal(str(taxa.get("preco_compra", "0")))
 
-        resposta = (
-            f"SUBCAIXA {moeda} - {day['date']}\n"
-            f"Saldo {moeda}: {saldo_moeda:,.2f}\n"
-            f"Referência USD: {saldo_usd:,.2f}\n"
-            f"Câmbio usado: {cambio_txt}\n"
-            f"Operações hoje: {ops_hoje}"
-        )
+            if taxa_ouro and taxa_ouro > 0:
+                saldo_usd = money(ouro_gramas * taxa_ouro)
+                cambio_txt = f"Cotacao ouro: {money(taxa_ouro)} USD/g"
+            else:
+                saldo_usd = Decimal("0")
+                cambio_txt = "Sem cotacao atual de ouro"
+
+            resposta = (
+                f"SUBCAIXA XAU - {day['date']}\n"
+                f"Saldo XAU: {ouro_gramas:,.3f} g\n"
+                f"Referência USD: {saldo_usd:,.2f}\n"
+                f"{cambio_txt}\n"
+                f"Operações hoje: {ops_hoje}"
+            )
+        else:
+            saldo_moeda = Decimal(str(moedas.get(moeda, "0")))
+            cambio = db.get_last_cambio_para_usd(moeda)
+            if moeda == "USD":
+                saldo_usd = saldo_moeda
+                cambio_txt = "1 USD = 1 USD"
+            elif cambio and cambio > 0:
+                saldo_usd = money(saldo_moeda / cambio)
+                cambio_txt = f"1 USD = {money(cambio)} {moeda}"
+            else:
+                saldo_usd = Decimal("0")
+                cambio_txt = "Sem câmbio recente"
+
+            resposta = (
+                f"SUBCAIXA {moeda} - {day['date']}\n"
+                f"Saldo {moeda}: {saldo_moeda:,.2f}\n"
+                f"Referência USD: {saldo_usd:,.2f}\n"
+                f"Câmbio usado: {cambio_txt}\n"
+                f"Operações hoje: {ops_hoje}"
+            )
     else:
         resposta = (
             f"CAIXA MULTIMOEDA - {day['date']}\n"
