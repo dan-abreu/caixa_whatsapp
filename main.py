@@ -2020,6 +2020,18 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
         caixa_resp = _build_caixa_response(db)
         caixa_msg = str(caixa_resp.get("mensagem", ""))
 
+        tipo_operacao = str(contexto.get("tipo_operacao", "compra"))
+        direcao_txt = "Saiu" if tipo_operacao == "compra" else "Entrou"
+        mov_linhas: List[str] = []
+        for pagamento in pagamentos:
+            moeda_pg = str(pagamento.get("moeda", "USD")).upper()
+            valor_moeda_pg = Decimal(str(pagamento.get("valor_moeda", "0")))
+            valor_usd_pg = Decimal(str(pagamento.get("valor_usd", "0")))
+            mov_linhas.append(
+                f"- {direcao_txt} {moeda_pg}: {money(valor_moeda_pg)} ({money(valor_usd_pg)} USD)"
+            )
+        mov_txt = "\n".join(mov_linhas) if mov_linhas else "- Sem pagamentos registrados"
+
         response_payload: Dict[str, Any] = {
             "mensagem": (
                 f"✅ Operação salva com sucesso.\n"
@@ -2027,6 +2039,8 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
                 f"Total USD: {money(total)}\n"
                 f"Pago USD: {money(total_pago)}\n"
                 f"Diferença USD: {diferenca}{alerta}\n"
+                "Movimentação desta operação:\n"
+                f"{mov_txt}\n"
                 "--------------------\n"
                 f"{caixa_msg}"
             ),
