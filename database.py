@@ -927,6 +927,134 @@ class DatabaseClient:
         except Exception:
             return []
 
+    def get_extrato_transactions(self, start_iso: str, end_iso: str) -> List[Dict[str, Any]]:
+        """Returns all gold operations in [start_iso, end_iso) ordered by date.
+
+        Priority: gold_transactions (guided flow, rich detail).
+        Supplement: transacoes entries that have no matching gold_transaction
+        (simple / AI flow). Duplicates from guided flow are detected by comparing
+        operator + timestamp within a 10-second window and are excluded from the
+        transacoes list.
+        """
+        from datetime import datetime as _dt
+
+        result: List[Dict[str, Any]] = []
+        gt_timestamps: List[Dict[str, str]] = []
+
+        # 1. Guided-flow records (gold_transactions + their payments).
+        try:
+            gt_resp = (
+                self.client.table("gold_transactions")
+                .select(
+                    "id,tipo_operacao,origem,gold_type,teor,peso,preco_usd,"
+                    "total_usd,total_pago_usd,diferenca_usd,pessoa,forma_pagamento,"
+                    "observacoes,operador_id,criado_em"
+                )
+                .gte("criado_em", start_iso)
+                .lt("criado_em", end_iso)
+                .order("criado_em", desc=False)
+                .execute()
+            )
+            gt_rows = cast(List[Dict[str, Any]], gt_resp.data or [])
+            gt_id_list = [int(r["id"]) for r in gt_rows if r.get("id") is not None]
+
+            payments_by_tx: Dict[int, List[Dict[str, Any]]] = {}
+            if gt_id_list:
+                gp_resp = (
+                    self.client.table("gold_payments")
+                    .select("gold_transaction_id,moeda,valor_moeda,cambio_para_usd,valor_usd,forma_pagamento")
+                    .in_("gold_transaction_id", gt_id_list)
+                    .execute()
+                )
+                gp_rows = cast(List[Dict[str, Any]], gp_resp.data or [])
+                for p in gp_rows:
+                    tid = int(p.get("gold_transaction_id", 0))
+                    payments_by_tx.setdefault(tid, []).append(p)
+
+            for row in gt_rows:
+                tid = row.get("id")
+                tid_int = int(tid) if tid is not None else 0
+                criado_em = str(row.get("criado_em") or "")
+                operador = str(row.get("operador_id") or "")
+                gt_timestamps.append({"ts": criado_em, "op": operador})
+                result.append({
+                    "source": "gold_transactions",
+                    "id": tid,
+                    "tipo_operacao": row.get("tipo_operacao"),
+                    "origem": row.get("origem"),
+                    "teor": row.get("teor"),
+                    "peso": row.get("peso"),
+                    "preco_usd": row.get("preco_usd"),
+                    "total_usd": row.get("total_usd"),
+                    "total_pago_usd": row.get("total_pago_usd"),
+                    "diferenca_usd": row.get("diferenca_usd"),
+                    "pessoa": row.get("pessoa"),
+                    "forma_pagamento": row.get("forma_pagamento"),
+                    "observacoes": row.get("observacoes"),
+                    "criado_em": criado_em,
+                    "pagamentos": payments_by_tx.get(tid_int, []),
+                })
+        except Exception:
+            pass
+
+        # 2. Simple-flow records from transacoes that are NOT a guided-flow duplicate.
+        try:
+            t_resp = (
+                self.client.table("transacoes")
+                .select(
+                    "id,tipo_operacao,quantidade,cotacao_usada,valor_total,"
+                    "moeda_liquidacao,valor_moeda,cambio_para_usd,operador_id,status,data_hora"
+                )
+                .gte("data_hora", start_iso)
+                .lt("data_hora", end_iso)
+                .order("data_hora", desc=False)
+                .execute()
+            )
+            t_rows = cast(List[Dict[str, Any]], t_resp.data or [])
+
+            for row in t_rows:
+                op = str(row.get("operador_id") or "")
+                ts = str(row.get("data_hora") or "")
+
+                # Skip if a gold_transaction from the same operator exists within 10 s.
+                is_guided_duplicate = False
+                try:
+                    t_time = _dt.fromisoformat(ts.replace("Z", "+00:00"))
+                    for gt_meta in gt_timestamps:
+                        if gt_meta["op"] != op:
+                            continue
+                        gt_time = _dt.fromisoformat(gt_meta["ts"].replace("Z", "+00:00"))
+                        if abs((t_time - gt_time).total_seconds()) <= 10:
+                            is_guided_duplicate = True
+                            break
+                except Exception:
+                    pass
+
+                if is_guided_duplicate:
+                    continue
+
+                result.append({
+                    "source": "transacoes",
+                    "id": row.get("id"),
+                    "tipo_operacao": row.get("tipo_operacao"),
+                    "peso": row.get("quantidade"),
+                    "preco_usd": row.get("cotacao_usada"),
+                    "total_usd": row.get("valor_total"),
+                    "total_pago_usd": row.get("valor_total"),
+                    "diferenca_usd": "0",
+                    "moeda": row.get("moeda_liquidacao"),
+                    "valor_moeda": row.get("valor_moeda"),
+                    "cambio_para_usd": row.get("cambio_para_usd"),
+                    "status": row.get("status"),
+                    "criado_em": ts,
+                    "pagamentos": [],
+                })
+        except Exception:
+            pass
+
+        result.sort(key=lambda r: str(r.get("criado_em") or ""))
+        return result
+
     def get_risk_alerts(self, start_iso: str, end_iso: str) -> List[Dict[str, Any]]:
         # Works on existing logs table, independent of enterprise migrations.
         try:

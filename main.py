@@ -144,16 +144,27 @@ def menu() -> Dict[str, Any]:
         "funcionalidades": [
             {
                 "id": 1,
-                "nome": "Ver caixa",
+                "nome": "Ver saldo (caixa)",
                 "intencao": "consultar_relatorio",
-                "descricao": "Mostra saldo do dia e resumo das operacoes.",
+                "descricao": "Mostra saldo atual por moeda e total de ouro em estoque.",
                 "exemplos": [
                     "caixa",
                     "caixa eur",
-                    "caixa srd",
-                    "extrato"
+                    "caixa srd"
                 ],
-                "resposta_esperada": "Retorna saldos e total do dia."
+                "resposta_esperada": "Retorna saldos atuais."
+            },
+            {
+                "id": 6,
+                "nome": "Extrato detalhado",
+                "intencao": "extrato",
+                "descricao": "Lista todas as operacoes do periodo com detalhes de cada lancamento.",
+                "exemplos": [
+                    "extrato",
+                    "extrato hoje",
+                    "extrato semana"
+                ],
+                "resposta_esperada": "Retorna extrato detalhado no estilo bancario."
             },
             {
                 "id": 2,
@@ -258,6 +269,9 @@ _GUIDED_FLOW_STATES = {
     "await_preco_simples",
     "await_moeda_simples",
     "await_cambio_simples",
+    "await_extrato_periodo",
+    "await_extrato_data_inicio",
+    "await_extrato_data_fim",
 }
 
 
@@ -566,6 +580,28 @@ def _try_handle_whatsapp_commands(
     mensagem: str,
 ) -> Optional[Dict[str, Any]]:
     text = mensagem.strip()
+    text_norm = _normalize_text(text)
+
+    # extrato: intercept before AI so it starts the dedicated extract flow.
+    if re.match(r"^extrato\b", text_norm):
+        if any(w in text_norm for w in {"hoje", "dia", "agora"}):
+            day = _build_day_range(None)
+            _clear_session(db, remetente)
+            return _build_extrato_response(db, day["start"], day["end"], f"Hoje ({day['date']})")
+        if any(w in text_norm for w in {"semana", "week"}):
+            week = _build_week_range()
+            _clear_session(db, remetente)
+            return _build_extrato_response(db, week["start"], week["end"], week["label"])
+        _save_session(db, remetente, "await_extrato_periodo", {})
+        return {
+            "mensagem": (
+                "EXTRATO - selecione o periodo:\n"
+                "1) Hoje\n"
+                "2) Esta semana\n"
+                "3) Informar datas"
+            ),
+            "dados": {"etapa": "await_extrato_periodo"},
+        }
 
     # editar 123 preco 110
     edit_match = re.match(r"^\s*(editar|edit)\s+(.+?)\s+([\w_çÇãÃâÂáÁéÉíÍóÓúÚ]+)\s+(.+?)\s*$", text, re.IGNORECASE)
@@ -709,7 +745,7 @@ def _build_whatsapp_checklist_menu() -> str:
         "MENU FACIL\n"
         "1) Registrar compra/venda de ouro\n"
         "   Ex: Comprei 2g de ouro a 105\n\n"
-        "2) Ver caixa\n"
+        "2) Ver saldo\n"
         "   Ex: caixa | caixa eur | caixa srd\n\n"
         "3) Atualizar taxa (admin)\n"
         "   Ex: taxa usd 5.40\n\n"
@@ -717,6 +753,7 @@ def _build_whatsapp_checklist_menu() -> str:
         "   Ex: editar 123 preco 110\n\n"
         "5) Cancelar operacao\n"
         "   Ex: cancelar 123\n\n"
+        "Dica: para extrato detalhado, envie: extrato\n\n"
         "Responda com 1, 2, 3, 4 ou 5."
     )
 
@@ -828,6 +865,127 @@ def _build_caixa_response(db: DatabaseClient, requested_currency: Optional[str] 
             "ops_hoje": ops_hoje,
             "summary": summary,
             "requested_currency": requested_currency,
+        },
+    }
+
+
+def _build_extrato_response(
+    db: DatabaseClient,
+    start_iso: str,
+    end_iso: str,
+    label_periodo: str,
+) -> Dict[str, Any]:
+    """Build a professional bank-style transaction statement for the given period."""
+    transactions = db.get_extrato_transactions(start_iso, end_iso)
+    tz_offset_hours = int(os.getenv("TZ_OFFSET_HOURS", "-3"))
+    moeda_simbolo: Dict[str, str] = {"USD": "$", "EUR": "EUR ", "SRD": "SRD ", "BRL": "R$"}
+
+    linhas: List[str] = [
+        "===== EXTRATO =====",
+        f"Periodo: {label_periodo}",
+        f"Total: {len(transactions)} operac{'oes' if len(transactions) != 1 else 'ao'}",
+        "====================",
+    ]
+
+    total_compra_g = Decimal("0")
+    total_venda_g = Decimal("0")
+    total_compra_usd = Decimal("0")
+    total_venda_usd = Decimal("0")
+
+    for i, t in enumerate(transactions, 1):
+        tipo = str(t.get("tipo_operacao") or "").upper()
+        data_hora_raw = str(t.get("criado_em") or "")
+        try:
+            dt = datetime.fromisoformat(data_hora_raw.replace("Z", "+00:00"))
+            dt_local = dt + timedelta(hours=tz_offset_hours)
+            data_fmt = dt_local.strftime("%d/%m %H:%M")
+        except Exception:
+            data_fmt = data_hora_raw[:16]
+
+        peso = Decimal(str(t.get("peso") or "0"))
+        preco_usd = Decimal(str(t.get("preco_usd") or "0"))
+        total_usd_val = Decimal(str(t.get("total_usd") or "0"))
+        total_pago = Decimal(str(t.get("total_pago_usd") or total_usd_val))
+        diferenca = Decimal(str(t.get("diferenca_usd") or "0"))
+        pessoa = str(t.get("pessoa") or "").strip()
+        observacoes = str(t.get("observacoes") or "").strip()
+        status = str(t.get("status") or "registrada")
+        tid = t.get("id")
+
+        linhas.append("--------------------")
+        status_tag = f" [{status.upper()}]" if status not in ("registrada", "") else ""
+        linhas.append(f"#{i} | {data_fmt} | {tipo}{status_tag}")
+        if tid:
+            linhas.append(f"ID: {tid}")
+        if peso > 0:
+            linhas.append(f"Peso: {peso:,.3f} g")
+        if preco_usd > 0:
+            linhas.append(f"Preco: ${preco_usd:,.2f}/g")
+        linhas.append(f"Total ref: ${total_usd_val:,.2f}")
+
+        pagamentos: List[Dict[str, Any]] = t.get("pagamentos") or []
+        if pagamentos:
+            for p in pagamentos:
+                moeda = str(p.get("moeda") or "USD").upper()
+                valor_m = Decimal(str(p.get("valor_moeda") or "0"))
+                cambio = Decimal(str(p.get("cambio_para_usd") or "1"))
+                simbolo = moeda_simbolo.get(moeda, f"{moeda} ")
+                if moeda == "USD":
+                    linhas.append(f"Pago: {simbolo}{valor_m:,.2f}")
+                else:
+                    linhas.append(f"Pago: {simbolo}{valor_m:,.2f} (cambio: {cambio:,.4f})")
+        else:
+            moeda = str(t.get("moeda") or "USD").upper()
+            valor_m_raw = t.get("valor_moeda")
+            if valor_m_raw:
+                valor_m = Decimal(str(valor_m_raw))
+                cambio_raw = t.get("cambio_para_usd")
+                cambio = Decimal(str(cambio_raw)) if cambio_raw else Decimal("1")
+                simbolo = moeda_simbolo.get(moeda, f"{moeda} ")
+                if moeda == "USD":
+                    linhas.append(f"Pago: {simbolo}{valor_m:,.2f}")
+                else:
+                    linhas.append(f"Pago: {simbolo}{valor_m:,.2f} (cambio: {cambio:,.4f})")
+            else:
+                linhas.append(f"Pago: ${total_pago:,.2f}")
+
+        if diferenca != 0:
+            sinal = "+" if diferenca > 0 else ""
+            linhas.append(f"Diferenca: {sinal}${diferenca:,.2f}")
+        if pessoa:
+            linhas.append(f"Pessoa: {pessoa}")
+        if observacoes:
+            linhas.append(f"Obs: {observacoes[:60]}")
+
+        if tipo == "COMPRA":
+            total_compra_g += peso
+            total_compra_usd += total_usd_val
+        elif tipo in ("VENDA", "CAMBIO"):
+            total_venda_g += peso
+            total_venda_usd += total_usd_val
+
+    linhas.append("====================")
+    linhas.append("RESUMO:")
+    if not transactions:
+        linhas.append("Nenhuma operacao encontrada.")
+    else:
+        if total_compra_g > 0:
+            n_c = sum(1 for x in transactions if str(x.get("tipo_operacao") or "").upper() == "COMPRA")
+            linhas.append(f"Compras: {n_c} op | {total_compra_g:,.3f} g | ${total_compra_usd:,.2f}")
+        if total_venda_g > 0:
+            n_v = sum(1 for x in transactions if str(x.get("tipo_operacao") or "").upper() in ("VENDA", "CAMBIO"))
+            linhas.append(f"Vendas:  {n_v} op | {total_venda_g:,.3f} g | ${total_venda_usd:,.2f}")
+        saldo_g = total_compra_g - total_venda_g
+        sinal_g = "+" if saldo_g >= 0 else ""
+        linhas.append(f"Saldo ouro: {sinal_g}{saldo_g:,.3f} g")
+    linhas.append("====================")
+
+    return {
+        "mensagem": "\n".join(linhas),
+        "dados": {
+            "intencao": "extrato",
+            "periodo": label_periodo,
+            "total_operacoes": len(transactions),
         },
     }
 
@@ -1012,6 +1170,49 @@ def _build_day_range(date_str: Optional[str]) -> Dict[str, str]:
     start_dt = datetime(base_date.year, base_date.month, base_date.day, tzinfo=timezone.utc)
     end_dt = start_dt + timedelta(days=1)
     return {"start": start_dt.isoformat(), "end": end_dt.isoformat(), "date": str(base_date)}
+
+
+def _build_week_range() -> Dict[str, str]:
+    """ISO range from Monday of the current week to end of today (inclusive)."""
+    tz_offset_hours = int(os.getenv("TZ_OFFSET_HOURS", "-3"))
+    utc_now = datetime.now(timezone.utc)
+    local_now = utc_now + timedelta(hours=tz_offset_hours)
+    today = local_now.date()
+    monday = today - timedelta(days=today.weekday())
+    start_dt = datetime(monday.year, monday.month, monday.day, tzinfo=timezone.utc)
+    end_dt = datetime(today.year, today.month, today.day, tzinfo=timezone.utc) + timedelta(days=1)
+    return {
+        "start": start_dt.isoformat(),
+        "end": end_dt.isoformat(),
+        "label": f"{monday.isoformat()} a {today.isoformat()}",
+    }
+
+
+def _parse_date_user_input(text: str) -> Optional[str]:
+    """Accept DD/MM/AAAA, DD/MM/AA, DD-MM-AAAA, or AAAA-MM-DD → return YYYY-MM-DD."""
+    import re as _re
+    s = text.strip()
+    m = _re.match(r"^(\d{1,2})[/\-](\d{1,2})(?:[/\-](\d{2,4}))?$", s)
+    if m:
+        day, month = int(m.group(1)), int(m.group(2))
+        year_raw = m.group(3)
+        if year_raw:
+            year = int(year_raw)
+            if year < 100:
+                year += 2000
+        else:
+            from datetime import date as _date
+            year = _date.today().year
+        try:
+            from datetime import date as _date
+            _date(year, month, day)
+            return f"{year:04d}-{month:02d}-{day:02d}"
+        except ValueError:
+            return None
+    m2 = _re.match(r"^(\d{4})-(\d{2})-(\d{2})$", s)
+    if m2:
+        return s
+    return None
 
 
 def _build_custom_range(start: str, end: str) -> Dict[str, str]:
@@ -1629,6 +1830,76 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
             }
         contexto["cambio_para_usd"] = str(cambio)
         return _finish_transacao_simples(db, remetente, mensagem, contexto)
+
+    # ── Extrato guided flow ──────────────────────────────────────────────────
+    if estado == "await_extrato_periodo":
+        escolha = _normalize_text(mensagem)
+        if escolha in {"1", "hoje", "dia", "hoje (1)", "1)"}:
+            day = _build_day_range(None)
+            _clear_session(db, remetente)
+            return _build_extrato_response(db, day["start"], day["end"], f"Hoje ({day['date']})")
+        if escolha in {"2", "semana", "esta semana", "week", "2)"}:
+            week = _build_week_range()
+            _clear_session(db, remetente)
+            return _build_extrato_response(db, week["start"], week["end"], week["label"])
+        if escolha in {"3", "data", "datas", "informar", "informar datas", "outro", "3)"}:
+            _save_session(db, remetente, "await_extrato_data_inicio", {})
+            return {
+                "mensagem": (
+                    "Informe a data inicial:\n"
+                    "Ex: 01/04/2026 ou 2026-04-01"
+                ),
+                "dados": {"etapa": "await_extrato_data_inicio"},
+            }
+        return {
+            "mensagem": "Escolha invalida. Digite 1, 2 ou 3.",
+            "dados": {"etapa": "await_extrato_periodo"},
+        }
+
+    if estado == "await_extrato_data_inicio":
+        parsed = _parse_date_user_input(mensagem.strip())
+        if not parsed:
+            return {
+                "mensagem": "Data invalida. Use o formato DD/MM/AAAA ou AAAA-MM-DD.",
+                "dados": {"etapa": estado},
+            }
+        _save_session(db, remetente, "await_extrato_data_fim", {"data_inicio": parsed})
+        return {
+            "mensagem": (
+                f"Data inicial: {parsed}\n"
+                "Agora informe a data final:\n"
+                "Ex: 04/04/2026 ou 2026-04-04"
+            ),
+            "dados": {"etapa": "await_extrato_data_fim"},
+        }
+
+    if estado == "await_extrato_data_fim":
+        parsed = _parse_date_user_input(mensagem.strip())
+        if not parsed:
+            return {
+                "mensagem": "Data invalida. Use o formato DD/MM/AAAA ou AAAA-MM-DD.",
+                "dados": {"etapa": estado},
+            }
+        data_inicio = str(contexto.get("data_inicio", ""))
+        if not data_inicio:
+            _clear_session(db, remetente)
+            return {"mensagem": "Erro interno. Tente novamente: extrato", "dados": {"etapa": "reiniciar"}}
+        try:
+            start_day = _build_day_range(data_inicio)
+            end_day = _build_day_range(parsed)
+        except HTTPException:
+            return {
+                "mensagem": "Datas invalidas. Use o formato AAAA-MM-DD.",
+                "dados": {"etapa": estado},
+            }
+        if end_day["start"] < start_day["start"]:
+            return {
+                "mensagem": "A data final deve ser maior ou igual a data inicial.",
+                "dados": {"etapa": estado},
+            }
+        label = f"{data_inicio} a {parsed}"
+        _clear_session(db, remetente)
+        return _build_extrato_response(db, start_day["start"], end_day["end"], label)
 
     return {"mensagem": "Nao consegui continuar. Vamos reiniciar. Digite: compra ou venda.", "dados": {"etapa": "reiniciar"}}
 
