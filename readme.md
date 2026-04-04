@@ -1,125 +1,104 @@
-# Caixa Inteligente via WhatsApp (MVP)
+# Caixa Inteligente via WhatsApp
 
-Backend em Python + FastAPI para registrar operações de caixa (ouro e câmbio) a partir de mensagens recebidas por webhook.
+Backend em Python + FastAPI para operar caixa multimoeda (USD, EUR, SRD, BRL, XAU) via WhatsApp, com persistência em Supabase e extração de intenção por IA.
 
-## Objetivo
+## Resumo
 
-O sistema recebe mensagens de texto (simulando WhatsApp), usa IA para extrair dados estruturados e executa as regras de negócio no backend:
+O sistema recebe mensagens de WhatsApp, interpreta intenção e executa regras de negócio no backend (com Decimal), incluindo:
 
-- Atualização de taxa por admin
-- Registro de operação por funcionário
-
-A IA não realiza cálculo financeiro. Todos os cálculos são feitos no backend com Decimal.
+- Registro de operação com fluxo guiado
+- Taxas e câmbio manual com validação
+- Caixa multimoeda e subcaixa por moeda
+- Recibo com ID único
+- Edição/cancelamento de operação por comando
+- Onboarding por nome e menu numerado
 
 ## Stack
 
-- Python
+- Python 3.11-3.13 (recomendado 3.12 no Windows)
 - FastAPI
 - Supabase (PostgreSQL)
 - Google Gemini API
+- Twilio WhatsApp (integração direta)
 
-## Estrutura
+## Estrutura do Projeto
 
-- schema.sql: DDL do banco + seed de ativos e usuários padrão
-- database.py: acesso a dados via supabase-py
-- ai_service.py: integração com Gemini + extração de JSON
-- main.py: API FastAPI e regras de negócio
-- simulate_whatsapp.py: script de simulação local do webhook
-- setup.ps1: setup automatizado do ambiente no Windows
-- run.ps1: execução automatizada da API no Windows
-- invoke_whatsapp.ps1: envio de mensagem de teste via PowerShell
-- .env.example: exemplo de configuração
-- requirements.txt: dependências do projeto
+- `main.py`: API e regras de negócio
+- `database.py`: acesso a dados (supabase-py)
+- `ai_service.py`: extração de dados via IA
+- `schema.sql`: DDL + seed inicial
+- `requirements.txt`: dependências
+- `setup.ps1`, `run.ps1`: automação local no Windows
+- `simulate_whatsapp.py`, `invoke_whatsapp.ps1`: testes locais
+- `.env.example`: variáveis de ambiente
 
-## Pré-requisitos
+## Configuração Local
 
-- Python 3.11 a 3.13
-- Projeto Supabase com acesso ao banco
-- Chave de API do Gemini
+### 1) Ambiente virtual
 
-Observação para Windows:
-
-- Evite Python 3.14 neste projeto por enquanto, porque algumas dependências ainda podem cair em build nativo sem wheel pronta.
-- Se a instalação falhar com erro de compilação no Windows, recrie a virtualenv com Python 3.12, que é a opção mais estável hoje para este stack.
-
-## Configuração
-
-1. Criar e ativar ambiente virtual
-
-Windows PowerShell:
-
+```powershell
 py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
+```
 
-Se você já estiver com uma `.venv` quebrada, remova a pasta e recrie antes de instalar as dependências.
-
-Alternativa genérica:
-
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-
-Atalho recomendado no Windows:
+Opcional:
 
 ```powershell
 .\setup.ps1 -RecreateVenv
 ```
 
-1. Instalar dependências
+### 2) Dependências
 
+```powershell
 pip install -r requirements.txt
+```
 
-1. Criar arquivo de ambiente
+### 3) Variáveis de ambiente
 
-Copie o arquivo .env.example para .env e preencha os valores.
+Copie `.env.example` para `.env` e preencha.
 
-Variáveis obrigatórias:
+Obrigatórias:
 
-- SUPABASE_URL
-- SUPABASE_SERVICE_ROLE_KEY (ou SUPABASE_KEY)
-- GEMINI_API_KEY
-- WEBHOOK_TOKEN
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_ROLE_KEY` (ou `SUPABASE_KEY`)
+- `GEMINI_API_KEY`
+- `WEBHOOK_TOKEN`
 
-Opcional:
+Importantes:
 
-- GEMINI_MODEL (padrão: gemini-1.5-flash)
-- APP_HOST (padrão recomendado: 127.0.0.1)
-- APP_PORT (padrão recomendado: 8000)
-- LOG_LEVEL (padrão recomendado: INFO)
-- SUPABASE_DB_URL (para aplicar schema via psql)
-- SUPABASE_PROJECT_REF (alternativa para montar a URL SQL)
-- SUPABASE_DB_PASSWORD (alternativa para montar a URL SQL)
-- MULTI_AGENT_AUTO_ENABLED (padrão: true)
-- MULTI_AGENT_AUTO_MIN_USD (padrão: 500)
-- MULTI_AGENT_AUTO_MIN_WEIGHT_GRAMS (padrão: 10)
+- `GEMINI_MODEL` (default: `gemini-2.5-flash`)
+- `TZ_OFFSET_HOURS` (default: `-3`)
+- `LOG_LEVEL` (default: `INFO`)
+- `MULTI_AGENT_AUTO_ENABLED` (default: `true`)
 
-## Banco de dados
+Twilio debug control:
 
-Execute o conteúdo de schema.sql no PostgreSQL do Supabase.
+- `TWILIO_REPLY_MODE=normal|silent_prefix|silent_all`
+- `TWILIO_SILENT_PREFIX=debug:`
 
-Se você tiver acesso SQL ao banco, também pode aplicar com o atalho:
+## Banco de Dados
+
+Execute `schema.sql` no Supabase.
+
+Opcional (se configurado):
 
 ```powershell
 .\apply_schema.ps1
 ```
 
-Esse script usa `SUPABASE_DB_URL` ou monta a URL a partir de `SUPABASE_PROJECT_REF` + `SUPABASE_DB_PASSWORD`.
+Tabelas principais:
 
-O script cria:
+- `usuarios`, `ativos`, `taxas_diarias`, `transacoes`, `logs`
+- `sessoes_conversa`, `mensagens_processadas`
+- `gold_transactions`, `gold_payments`
 
-- tipo_ativo (ouro, moeda)
-- tipo_operacao (compra, venda, cambio)
-- tipo_usuario (admin, operador)
-- tabelas: ativos, usuarios, taxas_diarias, transacoes, logs
-- tabelas enterprise adicionais: mensagens_processadas, sessoes_conversa, gold_transactions, gold_payments, multi_agent_runs, gold_audit_log, transaction_history
-- índices de consulta
-- seed idempotente de ativos: Ouro 24k, USD, EUR, SRD
-- seed idempotente de usuários: Administrador e Operador 1
+## Execução da API
 
-## Executando a API
-
+```powershell
 uvicorn main:app --reload --host 127.0.0.1 --port 8000
+```
 
-Atalho recomendado no Windows:
+Ou:
 
 ```powershell
 .\run.ps1
@@ -127,146 +106,134 @@ Atalho recomendado no Windows:
 
 Health check:
 
-GET /health
+- `GET /health`
 
-Análise multiagente manual:
+## Webhooks
 
-POST /ai/multi-agent/analyze
+### JSON webhook (integrações/API)
 
-Histórico recente de análises multiagente:
+- `POST /webhook/whatsapp`
+- Token via `X-Webhook-Token` ou `?token=`
 
-GET /ai/multi-agent/runs?limit=10
+Body exemplo:
 
-Webhook principal:
-
-POST /webhook/whatsapp
-
-Autenticação aceita:
-
-- Header X-Webhook-Token com valor igual ao WEBHOOK_TOKEN
-- Ou query string ?token=<WEBHOOK_TOKEN>
-
-Observação de produção:
-
-- Em Railway + Pipedream, mantenha o mesmo valor de WEBHOOK_TOKEN configurado na Railway e usado na URL ou header do passo HTTP do Pipedream.
-- Não grave o token real em arquivos versionados do repositório.
-
-Body JSON:
-
+```json
 {
-  "remetente": "+59700000000",
-  "mensagem": "Taxa ouro 68.50"
+  "remetente": "+5598991438754",
+  "mensagem": "comprei 10 gramas de ouro"
 }
+```
 
-## Fluxos
+### Twilio direto (produção WhatsApp)
 
-Fluxo A - Atualizar taxa (admin)
+- `POST /webhook/twilio?token=SEU_TOKEN`
+- Espera payload `application/x-www-form-urlencoded`
+- Responde TwiML XML
 
-- Remetente deve existir em usuarios e ter tipo_usuario=admin
-- Exemplo de mensagem: Taxa ouro 68.50
-- IA extrai intenção e variáveis
-- Backend grava em taxas_diarias
+URL recomendada no Twilio Sandbox:
 
-Exemplo de retorno:
+`https://SEU-APP.railway.app/webhook/twilio?token=SEU_TOKEN`
 
-{
-  "mensagem": "Taxa do ouro atualizada para 68.50",
-  "dados": {
-    "intencao": "atualizar_taxa",
-    "ativo": "Ouro 24k",
-    "taxa": "68.50"
-  }
-}
+## Fluxo Guiado de Operação
 
-Fluxo B - Registrar operação (funcionário)
+Exemplo de jornada completa:
 
-- Remetente deve existir em usuarios e estar ativo
-- Exemplo de mensagem: Comprei 10g de ouro
-- IA extrai intenção, ativo e quantidade
-- Backend pergunta o preço por grama em USD
-- Backend pergunta a moeda da liquidação (USD, EUR, SRD ou BRL)
-- Se a moeda não for USD, backend pergunta o câmbio manual no formato: 1 USD = X moeda
-- Backend calcula total com Decimal e grava a operação com moeda_liquidacao, valor_moeda e cambio_para_usd
-- Operações com risco, peso alto, valor alto, venda ou câmbio podem disparar análise multiagente automática
-- Quando disparada, a resposta inclui dados.analise_multiagente com resumo, decisões, riscos e recomendações
+1. Tipo (`compra`/`venda`)
+2. Origem (`balcao`/`fora`)
+3. Teor (`0` a `99.99`)
+4. Peso (gramas)
+5. Moeda base de preço (`USD`, `EUR`, `SRD`, `BRL`)
+6. Preço por grama na moeda escolhida
+7. Câmbio para USD (se não for USD)
+8. Moeda(s) de pagamento e valores
+9. Fechamento, pessoa, forma de pagamento, observações
+10. Confirmação e gravação
 
-Exemplo do fluxo rápido no WhatsApp:
+Durante o fluxo, o bot mostra cálculos parciais (total, parcial pago, restante e diferença).
 
-- Usuário: comprei 5g
-- Bot: Qual o preço por grama em USD para essa compra de 5g?
-- Usuário: 65
-- Bot: Em qual moeda foi liquidado? USD / EUR / SRD / BRL
-- Usuário: SRD
-- Bot: Qual o câmbio? (1 USD = quantos SRD)
-- Usuário: 38
-- Bot: confirma a operação com total USD e total em SRD
+## Correção sem Cancelar
 
-## Simulação local de WhatsApp
+Durante uma operação ativa, você pode corrigir etapa específica:
 
-Exemplo com script Python:
+- `voltar peso`
+- `voltar preco`
+- `voltar teor`
+- `voltar moedas`
+- `voltar pagamento`
+- `voltar fechamento`
+- `voltar` (uma etapa anterior)
 
-python simulate_whatsapp.py --remetente +59711111111 --mensagem "Comprei 10g de ouro" --token seu-token
+## Menu no WhatsApp
 
-Exemplo com PowerShell:
+Comandos como `menu`, `ajuda`, `comandos` mostram checklist numerado.
+
+Principais opções:
+
+1. Registrar operação
+2. Consultar caixa/extrato
+3. Atualizar taxa (admin)
+4. Editar operação
+5. Cancelar operação
+
+## Comandos Naturais de Gestão
+
+Editar operação:
+
+- `editar 123 preco 110`
+- `editar 123 quantidade 2.5`
+- `editar OP-20260403-00123 moeda EUR`
+
+Cancelar operação:
+
+- `cancelar 123`
+- `cancelar OP-20260403-00123`
+
+Permissão: admin ou operador dono da operação.
+
+## Caixa e Subcaixa
+
+Visão geral:
+
+- `caixa`
+
+Subcaixa por moeda:
+
+- `caixa usd`
+- `caixa eur`
+- `caixa srd`
+- `caixa brl`
+- `caixa xau` (ou `caixa ouro`)
+
+Para `XAU`, o sistema mostra saldo em gramas e referência em USD com base na última cotação.
+
+## Testes Locais Rápidos
+
+PowerShell:
 
 ```powershell
-.\invoke_whatsapp.ps1 -Remetente "+59711111111" -Mensagem "Comprei 10g de ouro"
+.\invoke_whatsapp.ps1 -Remetente "+5598991438754" -Mensagem "menu"
 ```
 
-Exemplo com curl:
+Curl (JSON webhook):
 
 ```bash
-curl -X POST "http://127.0.0.1:8000/webhook/whatsapp" \
+curl -X POST "http://127.0.0.1:8000/webhook/whatsapp?token=SEU_TOKEN" \
   -H "Content-Type: application/json" \
-  -H "X-Webhook-Token: seu-token" \
-  -d "{\"remetente\":\"+59711111111\",\"mensagem\":\"Comprei 10g de ouro\"}"
+  -d "{\"remetente\":\"+5598991438754\",\"mensagem\":\"caixa eur\"}"
 ```
 
-Exemplo em produção com Railway:
+## Segurança e Observabilidade
 
-```bash
-curl -X POST "https://SEU-APP.railway.app/webhook/whatsapp?token=seu-token" \
-  -H "Content-Type: application/json" \
-  -d "{\"remetente\":\"+59711111111\",\"mensagem\":\"extrato\"}"
-```
+- Token obrigatório em webhook
+- Controle de autorização por telefone ativo
+- Restrição de atualização de taxa para admin
+- Logs de entrada/saída e erros em banco
+- Idempotência por `provider_message_id`
 
-Integração recomendada Twilio + Pipedream + Railway:
+## Roadmap Recomendado
 
-- Twilio recebe a mensagem WhatsApp
-- Twilio chama o webhook do Pipedream
-- Pipedream envia POST para Railway em /webhook/whatsapp
-- Railway responde com JSON contendo campo mensagem
-- Pipedream envia esse texto de volta ao WhatsApp usando a API da Twilio
-
-Exemplo de retorno:
-
-{
-  "mensagem": "Compra registrada. 10 x 68.50 = 685.00.",
-  "dados": {
-    "intencao": "registrar_operacao",
-    "tipo_operacao": "compra",
-    "ativo": "Ouro 24k",
-    "quantidade": "10",
-    "cotacao_usada": "68.50",
-    "valor_total": "685.00"
-  }
-}
-
-## Segurança mínima atual
-
-- Token no header X-Webhook-Token
-- Restrição de atualização de taxa ao perfil admin
-- Lista de remetentes autorizados em usuarios
-
-## Auditoria e erros
-
-- Todas as entradas/saídas relevantes são registradas em logs
-- Erros de IA e de validação de contrato também são auditados
-- Execuções multiagente ficam disponíveis em /ai/multi-agent/runs e usam fallback em logs caso a tabela multi_agent_runs ainda não tenha sido migrada
-
-## Próximos passos recomendados
-
-- Adicionar testes automatizados (unitários e integração)
-- Registrar logs estruturados e observabilidade
-- Adicionar rate limit no webhook
-- Implementar autenticação mais robusta (assinatura HMAC)
+- Estorno formal (ao invés de edição direta) para trilha contábil
+- Fechamento diário por moeda (abertura/entradas/saídas/fechamento)
+- Assinatura HMAC para webhook Twilio
+- Testes automatizados (unitário + integração)
+- Observabilidade estruturada (métricas, tracing)
