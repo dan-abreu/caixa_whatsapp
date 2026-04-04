@@ -1599,13 +1599,16 @@ def _processar_webhook(
 
     if intencao == "conversar":
         nome_usuario = str(usuario.get("nome") or "").strip()
+        keep_menu_state = False
         if _is_help_menu_request(mensagem):
             resposta = _build_whatsapp_checklist_menu()
-            db.save_conversation_session(
+            _save_session(
                 remetente=remetente,
+                db=db,
                 estado="await_menu_option",
                 contexto={"origem": "menu"},
             )
+            keep_menu_state = True
         else:
             resposta = ai_data.resposta or (
                 "Posso te ajudar com operacoes, extrato e taxas. "
@@ -1622,11 +1625,13 @@ def _processar_webhook(
             "mensagem": resposta,
             "dados": {"intencao": intencao},
         }
-        db.save_conversation_session(
-            remetente=remetente,
-            estado="conversando",
-            contexto={"ultima_mensagem": mensagem, "ultima_intencao": intencao},
-        )
+        if not keep_menu_state:
+            _save_session(
+                db=db,
+                remetente=remetente,
+                estado="conversando",
+                contexto={"ultima_mensagem": mensagem, "ultima_intencao": intencao},
+            )
         db.insert_log(
             nivel="info",
             remetente=remetente,
