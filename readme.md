@@ -237,3 +237,69 @@ curl -X POST "http://127.0.0.1:8000/webhook/whatsapp?token=SEU_TOKEN" \
 - Assinatura HMAC para webhook Twilio
 - Testes automatizados (unitário + integração)
 - Observabilidade estruturada (métricas, tracing)
+
+---
+
+## English Quick Guide
+
+### What This Project Does
+
+This backend processes WhatsApp messages and runs multi-currency cash operations (USD, EUR, SRD, BRL, XAU) using FastAPI + Supabase.
+
+Key capabilities:
+
+- Guided transaction flow (buy/sell)
+- FX-aware pricing and settlement
+- Multi-currency cashbox and per-currency subcashbox
+- Operation receipt with unique ID
+- Edit/cancel operations by natural commands
+- User onboarding by phone number and name
+
+### Main Webhooks
+
+- `POST /webhook/whatsapp` (JSON integrations)
+- `POST /webhook/twilio?token=YOUR_TOKEN` (direct Twilio WhatsApp)
+
+Twilio endpoint returns TwiML XML responses.
+
+### Environment Variables (Core)
+
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_ROLE_KEY` (or `SUPABASE_KEY`)
+- `GEMINI_API_KEY`
+- `WEBHOOK_TOKEN`
+
+Optional but recommended:
+
+- `TZ_OFFSET_HOURS=-3`
+- `GEMINI_MODEL=gemini-2.5-flash`
+- `LOG_LEVEL=INFO`
+
+Twilio debug controls:
+
+- `TWILIO_REPLY_MODE=normal|silent_prefix|silent_all`
+- `TWILIO_SILENT_PREFIX=debug:`
+
+### Run Locally
+
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+uvicorn main:app --reload --host 127.0.0.1 --port 8000
+```
+
+### Useful WhatsApp Commands
+
+- `menu`
+- `caixa`, `caixa eur`, `caixa xau`
+- `editar 123 preco 110`
+- `cancelar 123`
+- `voltar preco` (inside guided flow)
+
+### Security Notes
+
+- Keep `WEBHOOK_TOKEN` private
+- Restrict admin-only actions (rate updates)
+- Use HTTPS-only webhooks
+- Rotate exposed credentials immediately
