@@ -1419,7 +1419,8 @@ def _advance_after_payment_exchange(
             contexto["moeda_index"] = idx
             contexto["moeda_atual"] = moedas[idx]
             proxima_moeda = str(moedas[idx]).upper()
-            if proxima_moeda != "USD":
+            preco_moeda = str(contexto.get("preco_moeda", "USD")).upper()
+            if proxima_moeda != "USD" and proxima_moeda != preco_moeda:
                 _save_session(db, remetente, "await_cambio_moeda_pre_valor", contexto)
                 return {
                     "mensagem": (
@@ -1728,7 +1729,7 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
             total_txt = "Total da operação definido."
 
         primeira_moeda = str(moedas[0]).upper()
-        if primeira_moeda != "USD":
+        if primeira_moeda != "USD" and primeira_moeda != preco_moeda:
             _save_session(db, remetente, "await_cambio_moeda_pre_valor", contexto)
             return {
                 "mensagem": (
