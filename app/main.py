@@ -104,6 +104,37 @@ def fx_rate(value: Decimal) -> Decimal:
     return value.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
 
 
+def _compute_sale_profit_reference(
+    db: DatabaseClient,
+    ativo_id: int,
+    peso: Decimal,
+    total_pago_usd: Decimal,
+) -> Optional[Dict[str, str]]:
+    taxa_atual = db.get_taxa_atual(ativo_id)
+    if not taxa_atual:
+        return None
+
+    preco_compra_raw = taxa_atual.get("preco_compra")
+    if preco_compra_raw is None:
+        return None
+
+    try:
+        preco_compra_ref = Decimal(str(preco_compra_raw))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+
+    if preco_compra_ref <= 0:
+        return None
+
+    custo_ref_usd = money(peso * preco_compra_ref)
+    lucro_ref_usd = money(total_pago_usd - custo_ref_usd)
+    return {
+        "preco_compra_ref_usd": str(money(preco_compra_ref)),
+        "custo_ref_usd": str(custo_ref_usd),
+        "lucro_ref_usd": str(lucro_ref_usd),
+    }
+
+
 def validate_webhook_token(token: Optional[str]) -> None:
     expected = os.getenv("WEBHOOK_TOKEN")
     if not expected:
@@ -802,6 +833,7 @@ def _build_caixa_detail_response(
     movement_rows: List[Dict[str, Any]] = []
     total_entries = Decimal("0")
     total_exits = Decimal("0")
+    total_sale_profit = Decimal("0")
 
     for tx in transactions:
         tipo = str(tx.get("tipo_operacao") or "").lower()
@@ -847,6 +879,16 @@ def _build_caixa_detail_response(
         else:
             total_exits += abs(movement)
 
+        lucro_venda: Optional[Decimal] = None
+        if tipo == "venda" and isinstance(tx.get("contexto"), dict):
+            lucro_raw = tx.get("contexto", {}).get("lucro_ref_usd")
+            if lucro_raw is not None:
+                try:
+                    lucro_venda = Decimal(str(lucro_raw))
+                    total_sale_profit += lucro_venda
+                except (InvalidOperation, TypeError, ValueError):
+                    lucro_venda = None
+
         movement_rows.append(
             {
                 "tx_id": str(tx.get("id") or "-"),
@@ -855,6 +897,7 @@ def _build_caixa_detail_response(
                 "movimento": movement,
                 "cliente": str(tx.get("pessoa") or "").strip(),
                 "operador": str(tx.get("operador_id") or "").strip(),
+                "lucro_usd": lucro_venda,
             }
         )
 
@@ -874,6 +917,9 @@ def _build_caixa_detail_response(
             lines.append(f"Cliente:  {row['cliente'][:40] if row['cliente'] else '—'}")
             lines.append(f"Operador: {row['operador'][:40] if row['operador'] else '—'}")
             lines.append(f"Valor:    {_format_caixa_movement(currency_up, cast(Decimal, row['movimento']))}")
+            lucro_usd = row.get("lucro_usd")
+            if isinstance(lucro_usd, Decimal):
+                lines.append(f"Lucro:    USD {money(lucro_usd)}")
     else:
         lines.append("Nenhuma movimentacao neste periodo.")
 
@@ -887,6 +933,8 @@ def _build_caixa_detail_response(
     )
     if movement_rows:
         lines.append(f"Ops:      {len(movement_rows)}")
+    if total_sale_profit != 0:
+        lines.append(f"Lucro vendas: USD {money(total_sale_profit)}")
 
     return {
         "mensagem": "\n".join(lines),
@@ -1899,6 +1947,21 @@ def _advance_after_payment_exchange(
             "dados": {"etapa": "await_pessoa"},
         }
 
+    peso_ctx = Decimal(str(contexto.get("peso", "0")))
+    if money(display_diferenca) == Decimal("0.00") and peso_ctx > 0:
+        contexto["fechamento_gramas"] = str(money(peso_ctx))
+        contexto["fechamento_tipo"] = "total"
+        _save_session(db, remetente, "await_pessoa", contexto)
+        return {
+            "mensagem": (
+                f"Total pago: {money(display_pago)} {display_moeda}.\n"
+                f"Diferença atual: {money(display_diferenca)} {display_moeda}.\n"
+                f"Venda fechada integralmente.\n"
+                f"Nome do comprador?{fx_notice}"
+            ),
+            "dados": {"etapa": "await_pessoa"},
+        }
+
     _save_session(db, remetente, "await_fechamento_gramas", contexto)
     return {
         "mensagem": (
@@ -2451,10 +2514,16 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
         total_pago = Decimal(str(contexto.get("total_pago_usd", "0")))
         diferenca = money(total - total_pago)
         risco_diferenca = abs(diferenca) >= _RISK_DIFF_LIMIT_USD
+        tipo_operacao_confirm = str(contexto.get("tipo_operacao", "compra"))
+
+        if tipo_operacao_confirm == "venda":
+            profit_ref = _compute_sale_profit_reference(db, ativo_id, peso, total_pago)
+            if profit_ref:
+                contexto.update(profit_ref)
 
         pagamentos = list(contexto.get("pagamentos", []))
         header_payload: Dict[str, Any] = {
-            "tipo_operacao": str(contexto.get("tipo_operacao", "compra")),
+            "tipo_operacao": tipo_operacao_confirm,
             "origem": str(contexto.get("origem", "balcao")),
             "gold_type": "fundido",
             "quebra": None,

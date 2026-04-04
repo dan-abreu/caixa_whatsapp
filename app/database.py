@@ -980,7 +980,7 @@ class DatabaseClient:
                 .select(
                     "id,tipo_operacao,origem,gold_type,teor,peso,preco_usd,"
                     "total_usd,total_pago_usd,diferenca_usd,pessoa,forma_pagamento,"
-                    "observacoes,operador_id,criado_em"
+                    "observacoes,operador_id,contexto,criado_em"
                 )
                 .gte("criado_em", start_iso)
                 .lt("criado_em", end_iso)
@@ -1024,6 +1024,7 @@ class DatabaseClient:
                     "operador_id": str(row.get("operador_id") or ""),
                     "forma_pagamento": row.get("forma_pagamento"),
                     "observacoes": row.get("observacoes"),
+                    "contexto": row.get("contexto") if isinstance(row.get("contexto"), dict) else {},
                     "criado_em": criado_em,
                     "pagamentos": payments_by_tx.get(tid_int, []),
                 })
