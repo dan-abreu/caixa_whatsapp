@@ -220,9 +220,9 @@ def menu() -> Dict[str, Any]:
             {"nome": "brl", "aliases": ["real", "reais"]}
         ],
         "dicas": [
-            "Escreva frases curtas.",
-            "Um dado por vez quando eu pedir.",
-            "Se travar, envie: menu",
+            "Use frases objetivas.",
+            "Responda uma informacao por vez.",
+            "Em caso de duvida, envie: menu",
             "Para corrigir etapa atual, envie: voltar"
         ]
     }
@@ -232,7 +232,7 @@ _ERROS_AMIGAVEIS: Dict[int, str] = {
     400: "Nao entendi. Tente assim: Comprei 2g de ouro a 105",
     401: "Acesso negado. Token invalido.",
     403: "Voce nao tem permissao para isso.",
-    404: "Nao encontrei isso. Se quiser, envie: menu",
+    404: "Recurso nao encontrado. Digite 'menu' para ver as opcoes.",
     422: "Faltou algum dado. Tente novamente com mensagem curta.",
     500: "Tive um erro interno. Tente de novo em alguns segundos.",
     502: "A IA nao respondeu agora. Tente de novo.",
@@ -348,7 +348,7 @@ def _guided_prompt_for_state(state: str, contexto: Dict[str, Any]) -> str:
         return "Passo 11: forma de pagamento (dinheiro, transferencia, cheque, misto)"
     if state == "await_observacoes":
         return "Passo 12: observacoes (ou digite 'nenhuma')"
-    return "Vamos continuar. Me responda com um dado por vez."
+    return "Continue informando os dados solicitados."
 
 
 def _guided_clear_from_step(contexto: Dict[str, Any], target_state: str) -> Dict[str, Any]:
@@ -1114,7 +1114,7 @@ def _start_guided_flow_if_requested(
     }
     _save_session(db, remetente, "await_origem", contexto)
     return {
-        "mensagem": f"Vamos la. Voce quer {tipo}.\nPasso 0: foi balcao ou fora?",
+        "mensagem": f"Iniciando registro de {tipo}.\nLocal da operacao: balcao ou fora?",
         "dados": {"intencao": "fluxo_guiado", "etapa": "await_origem"},
     }
 
@@ -1336,9 +1336,8 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
         _clear_session(db, remetente)
         return {
             "mensagem": (
-                f"Prazer, {nome}.\n"
-                "Seu nome foi salvo.\n"
-                "Agora envie: menu"
+                f"Bem-vindo, {nome}. Seu cadastro esta completo.\n"
+                "Digite 'menu' para acessar as opcoes."
             ),
             "dados": {"acao": "cadastro_nome", "nome": nome},
         }
@@ -1361,7 +1360,7 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
         )
         _save_session(db, remetente, "await_origem", contexto)
         return {
-            "mensagem": f"Certo. Vamos para {text}.\nPasso 1: foi balcao ou fora?",
+            "mensagem": f"Operacao: {text}.\nLocal: balcao ou fora?",
             "dados": {"intencao": "fluxo_guiado", "etapa": "await_origem"},
         }
 
@@ -1404,7 +1403,7 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
         contexto["preco_moeda"] = moeda_preco
         _save_session(db, remetente, "await_preco_usd", contexto)
         return {
-            "mensagem": f"Perfeito. Agora digite o preco por grama em {moeda_preco}.",
+            "mensagem": f"Informe o preco por grama em {moeda_preco}.",
             "dados": {"etapa": "await_preco_usd"},
         }
 
@@ -1432,8 +1431,8 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
         _save_session(db, remetente, "await_moedas", contexto)
         return {
             "mensagem": (
-                f"Parcial: {peso}g x {money(preco)} USD = {total} USD.\n"
-                "Agora diga as moedas de pagamento: USD, EUR, SRD, BRL"
+                f"{peso}g x {money(preco)} USD/g = {total} USD.\n"
+                "Informe as moedas de pagamento: USD, EUR, SRD, BRL"
             ),
             "dados": {"etapa": "await_moedas"},
         }
@@ -1502,9 +1501,9 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
             _save_session(db, remetente, "await_cambio_moeda", contexto)
             return {
                 "mensagem": (
-                    f"Registrado: {money(valor_moeda)} {moeda_atual}.\n"
+                    f"{moeda_atual}: {money(valor_moeda)} registrado.\n"
                     f"Total da operacao: {money(total_operacao)} USD.\n"
-                    f"Agora o cambio do {moeda_atual}: 1 USD = quantos {moeda_atual}?"
+                    f"Cambio do {moeda_atual}: 1 USD = quantos {moeda_atual}?"
                 ),
                 "dados": {"etapa": "await_cambio_moeda"},
             }
@@ -1520,8 +1519,8 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
             _save_session(db, remetente, "await_valor_moeda", contexto)
             return {
                 "mensagem": (
-                    f"Parcial pago: {money(total_pago_parcial)} USD. Restante: {restante} USD.\n"
-                    f"Quanto será pago em {moedas[idx]}?"
+                    f"Pago ate agora: {money(total_pago_parcial)} USD. Restante: {restante} USD.\n"
+                    f"Valor em {moedas[idx]}?"
                 ),
                 "dados": {"etapa": "await_valor_moeda"},
             }
@@ -1539,8 +1538,8 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
                 "mensagem": (
                     f"Total pago: {money(total_pago)} USD.\n"
                     f"Diferenca atual: {money(total_operacao - total_pago)} USD.\n"
-                    "Compra: fechamento automatico aplicado.\n"
-                    "Agora informe o nome da pessoa."
+                    "Fechamento calculado automaticamente.\n"
+                    "Informe o nome da contraparte."
                 ),
                 "dados": {"etapa": "await_pessoa"},
             }
@@ -1562,7 +1561,7 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
         pagamentos = list(contexto.get("pagamentos", []))
         if not pagamentos:
             _save_session(db, remetente, "await_moedas", contexto)
-            return {"mensagem": "Vamos reiniciar pagamentos. Quais moedas?", "dados": {"etapa": "await_moedas"}}
+            return {"mensagem": "Pagamentos reiniciados. Informe as moedas novamente.", "dados": {"etapa": "await_moedas"}}
 
         ultimo = dict(pagamentos[-1])
         valor_moeda = Decimal(str(ultimo["valor_moeda"]))
@@ -1584,8 +1583,8 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
             _save_session(db, remetente, "await_valor_moeda", contexto)
             return {
                 "mensagem": (
-                    f"Parcial pago: {money(total_pago_parcial)} USD. Restante: {restante} USD.\n"
-                    f"Quanto será pago em {moedas[idx]}?"
+                    f"Pago ate agora: {money(total_pago_parcial)} USD. Restante: {restante} USD.\n"
+                    f"Valor em {moedas[idx]}?"
                 ),
                 "dados": {"etapa": "await_valor_moeda"},
             }
@@ -1603,8 +1602,8 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
                 "mensagem": (
                     f"Total pago: {money(total_pago)} USD.\n"
                     f"Diferenca atual: {money(total_operacao - total_pago)} USD.\n"
-                    "Compra: fechamento automatico aplicado.\n"
-                    "Agora informe o nome da pessoa."
+                    "Fechamento calculado automaticamente.\n"
+                    "Informe o nome da contraparte."
                 ),
                 "dados": {"etapa": "await_pessoa"},
             }
@@ -1666,7 +1665,7 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
 
         if not confirm:
             _clear_session(db, remetente)
-            return {"mensagem": "Pronto. Operacao cancelada.", "dados": {"intencao": "fluxo_guiado_cancelado"}}
+            return {"mensagem": "Operacao cancelada com sucesso.", "dados": {"intencao": "fluxo_guiado_cancelado"}}
 
         ativo = db.get_ativo_by_nome("Ouro")
         if not ativo:
@@ -1903,7 +1902,7 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
         _clear_session(db, remetente)
         return _build_extrato_response(db, start_day["start"], end_day["end"], label)
 
-    return {"mensagem": "Nao consegui continuar. Vamos reiniciar. Digite: compra ou venda.", "dados": {"etapa": "reiniciar"}}
+    return {"mensagem": "Nao foi possivel continuar o fluxo. Inicie novamente: compra ou venda.", "dados": {"etapa": "reiniciar"}}
 
 
 def _finish_transacao_simples(
@@ -1995,7 +1994,7 @@ def _finish_transacao_simples(
             f"Preco: ${money(cotacao)}/g\n"
             f"Total USD: ${total_usd}\n"
             f"Pagamento: {moeda_linha}\n"
-            "Pronto. Operacao concluida."
+            "Operacao registrada com sucesso."
         ),
         "dados": {
             "intencao": "registrar_operacao",
@@ -2423,7 +2422,7 @@ def _processar_webhook(
     if _is_greeting(mensagem) and _needs_name_onboarding(usuario):
         _save_session(db, remetente, "await_nome_usuario", {"source": "onboarding"})
         return {
-            "mensagem": "Oi. Para comecar, qual e o seu nome?",
+            "mensagem": "Ola. Para comecar, informe seu nome.",
             "dados": {"etapa": "await_nome_usuario"},
         }
 
@@ -2448,8 +2447,8 @@ def _processar_webhook(
             quantidade=None,
             valor_informado=None,
             resposta=(
-                "Nao consegui interpretar com seguranca. "
-                "Me envie no formato: 'Comprei 2g de ouro a 105' ou 'Taxa USD 5.40'."
+                "Nao foi possivel interpretar a mensagem. "
+                "Tente: 'Comprei 2g de ouro a 105' ou 'Taxa USD 5.40'."
             ),
         )
     except ValidationError as exc:
@@ -2467,8 +2466,8 @@ def _processar_webhook(
             quantidade=None,
             valor_informado=None,
             resposta=(
-                "Recebi dados incompletos. "
-                "Me passe a operacao com ativo e quantidade, por exemplo: 'Vendi 3g de ouro'."
+                "Dados insuficientes. "
+                "Informe o ativo e a quantidade, por exemplo: 'Vendi 3g de ouro'."
             ),
         )
 
@@ -2489,15 +2488,15 @@ def _processar_webhook(
             keep_menu_state = True
         else:
             resposta = ai_data.resposta or (
-                "Eu te ajudo com 3 coisas: ouro, cambio e caixa. "
-                "Se quiser, envie: menu"
+                "Posso ajudar com operacoes de ouro, cambio e consulta de caixa.\n"
+                "Digite 'menu' para ver as opcoes."
             )
 
         if _is_greeting(mensagem) and nome_usuario:
             resposta = (
-                f"Oi, {nome_usuario}.\n"
-                "Vamos fazer de forma simples.\n"
-                "Envie: menu"
+                f"Ola, {nome_usuario}.\n"
+                "Como posso ajudar?\n"
+                "Digite 'menu' para ver as opcoes."
             )
         response_payload: Dict[str, Any] = {
             "mensagem": resposta,
