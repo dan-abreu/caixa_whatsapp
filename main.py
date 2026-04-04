@@ -738,18 +738,18 @@ def _build_caixa_response(db: DatabaseClient, requested_currency: Optional[str] 
         val_str = moedas.get(m, "0")
         val = Decimal(str(val_str))
         simbolo = moeda_simbolo.get(m, m)
-        sinal = "+" if val >= 0 else ""
-        linhas_moeda.append(f"- {m}: {sinal}{simbolo}{val:,.2f}")
+        situacao = "positivo" if val >= 0 else "negativo"
+        linhas_moeda.append(f"- {m}: {simbolo}{val:,.2f} ({situacao})")
 
     for m, val_str in moedas.items():
         if m not in moeda_ordem:
             val = Decimal(str(val_str))
-            sinal = "+" if val >= 0 else ""
-            linhas_moeda.append(f"- {m}: {sinal}{val:,.2f}")
+            situacao = "positivo" if val >= 0 else "negativo"
+            linhas_moeda.append(f"- {m}: {val:,.2f} ({situacao})")
 
     moedas_txt = "\n".join(linhas_moeda) if linhas_moeda else "Sem movimentações"
     ouro_val = Decimal(str(gold_gramas))
-    sinal_ouro = "+" if ouro_val >= 0 else ""
+    ouro_situacao = "positivo" if ouro_val >= 0 else "negativo"
 
     if requested_currency:
         moeda = requested_currency.upper()
@@ -770,11 +770,15 @@ def _build_caixa_response(db: DatabaseClient, requested_currency: Optional[str] 
                 cambio_txt = "Sem cotacao atual de ouro"
 
             resposta = (
-                f"SUBCAIXA XAU - {day['date']}\n"
-                f"Saldo XAU: {ouro_gramas:,.3f} g\n"
-                f"Referência USD: {saldo_usd:,.2f}\n"
-                f"{cambio_txt}\n"
-                f"Operações hoje: {ops_hoje}"
+                f"SALDO ORGANIZADO - XAU\n"
+                f"Data: {day['date']}\n"
+                f"Operacoes hoje: {ops_hoje}\n"
+                "--------------------\n"
+                f"1) Ouro em estoque: {ouro_gramas:,.3f} g\n"
+                f"2) Referencia em USD: {saldo_usd:,.2f}\n"
+                f"3) {cambio_txt}\n"
+                "--------------------\n"
+                "Leitura rapida: quanto maior o valor, maior o estoque de ouro."
             )
         else:
             saldo_moeda = Decimal(str(moedas.get(moeda, "0")))
@@ -790,18 +794,29 @@ def _build_caixa_response(db: DatabaseClient, requested_currency: Optional[str] 
                 cambio_txt = "Sem cambio recente"
 
             resposta = (
-                f"SUBCAIXA {moeda} - {day['date']}\n"
-                f"Saldo {moeda}: {saldo_moeda:,.2f}\n"
-                f"Referência USD: {saldo_usd:,.2f}\n"
-                f"Cambio usado: {cambio_txt}\n"
-                f"Operações hoje: {ops_hoje}"
+                f"SALDO ORGANIZADO - {moeda}\n"
+                f"Data: {day['date']}\n"
+                f"Operacoes hoje: {ops_hoje}\n"
+                "--------------------\n"
+                f"1) Saldo em {moeda}: {saldo_moeda:,.2f}\n"
+                f"2) Equivalente em USD: {saldo_usd:,.2f}\n"
+                f"3) Cambio usado: {cambio_txt}\n"
+                "--------------------\n"
+                "Leitura rapida: positivo = entrou mais, negativo = saiu mais."
             )
     else:
         resposta = (
-            f"CAIXA MULTIMOEDA - {day['date']}\n"
-            f"Ouro em estoque: {sinal_ouro}{ouro_val:,.3f} g\n"
+            "SALDO ORGANIZADO\n"
+            f"Data: {day['date']}\n"
+            f"Operacoes hoje: {ops_hoje}\n"
+            "====================\n"
+            f"1) Ouro em estoque: {ouro_val:,.3f} g ({ouro_situacao})\n"
+            "2) Saldos por moeda:\n"
             f"{moedas_txt}\n"
-            f"Operações hoje: {ops_hoje}"
+            "====================\n"
+            "Como ler:\n"
+            "- positivo: entrou mais do que saiu\n"
+            "- negativo: saiu mais do que entrou"
         )
     return {
         "mensagem": resposta,
