@@ -5,7 +5,6 @@ import unicodedata
 from html import escape
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
-from typing import Any, Dict, List, Optional, cast
 from typing import Any, Dict, List, Optional, Tuple, cast
 from urllib.parse import parse_qs
 
@@ -157,6 +156,198 @@ def _attach_sale_profit_reference(db: DatabaseClient, contexto: Dict[str, Any]) 
     profit_ref = _compute_sale_profit_reference(db, int(ativo["id"]), peso, total_pago)
     if profit_ref:
         contexto.update(profit_ref)
+
+    inventory_txs = db.get_gold_inventory_transactions()
+    lots = _build_fifo_inventory_lots(inventory_txs)
+    fifo_result = _preview_fifo_sale_consumption(lots, peso)
+    consumed_grams = Decimal(str(fifo_result.get("consumed_grams") or "0"))
+    consumed_cost = Decimal(str(fifo_result.get("consumed_cost_usd") or "0"))
+    shortfall = Decimal(str(fifo_result.get("shortfall_grams") or "0"))
+    if consumed_grams > 0 and shortfall == 0:
+        contexto.update(
+            {
+                "profit_method": "fifo_real",
+                "custo_fifo_usd": str(money(consumed_cost)),
+                "lucro_real_usd": str(money(total_pago - consumed_cost)),
+                "consumo_fifo": fifo_result.get("breakdown", []),
+            }
+        )
+    elif shortfall > 0:
+        contexto["profit_method"] = "fifo_insufficient_stock"
+        contexto["fifo_shortfall_grams"] = str(shortfall)
+
+
+def _build_fifo_inventory_lots(transactions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    lots: List[Dict[str, Any]] = []
+    ordered = sorted(
+        transactions,
+        key=lambda tx: (
+            str(tx.get("criado_em") or ""),
+            int(tx.get("id") or 0),
+        ),
+    )
+    for tx in ordered:
+        tipo = str(tx.get("tipo_operacao") or "").lower()
+        if tipo not in {"compra", "venda"}:
+            continue
+
+        try:
+            peso = Decimal(str(tx.get("peso") or "0"))
+        except (InvalidOperation, TypeError, ValueError):
+            continue
+
+        if peso <= 0:
+            continue
+
+        if tipo == "compra":
+            try:
+                unit_cost = Decimal(str(tx.get("preco_usd") or "0"))
+            except (InvalidOperation, TypeError, ValueError):
+                unit_cost = Decimal("0")
+            lots.append(
+                {
+                    "source_id": int(tx.get("id") or 0),
+                    "criado_em": str(tx.get("criado_em") or ""),
+                    "remaining_grams": peso,
+                    "unit_cost_usd": unit_cost,
+                }
+            )
+            continue
+
+        remaining_sale = peso
+        while remaining_sale > 0 and lots:
+            head = lots[0]
+            head_remaining = Decimal(str(head.get("remaining_grams") or "0"))
+            if head_remaining <= 0:
+                lots.pop(0)
+                continue
+            consumed = min(head_remaining, remaining_sale)
+            head["remaining_grams"] = str(head_remaining - consumed)
+            remaining_sale -= consumed
+            if Decimal(str(head.get("remaining_grams") or "0")) <= 0:
+                lots.pop(0)
+
+    normalized: List[Dict[str, Any]] = []
+    for lot in lots:
+        remaining = Decimal(str(lot.get("remaining_grams") or "0"))
+        if remaining > 0:
+            normalized.append(
+                {
+                    "source_id": int(lot.get("source_id") or 0),
+                    "criado_em": str(lot.get("criado_em") or ""),
+                    "remaining_grams": str(remaining),
+                    "unit_cost_usd": str(Decimal(str(lot.get("unit_cost_usd") or "0"))),
+                }
+            )
+    return normalized
+
+
+def _preview_fifo_sale_consumption(
+    lots: List[Dict[str, Any]],
+    peso_venda: Decimal,
+) -> Dict[str, Any]:
+    remaining_sale = peso_venda
+    consumed_cost = Decimal("0")
+    consumed_grams = Decimal("0")
+    breakdown: List[Dict[str, Any]] = []
+
+    working_lots = [dict(lot) for lot in lots]
+    for lot in working_lots:
+        if remaining_sale <= 0:
+            break
+        lot_remaining = Decimal(str(lot.get("remaining_grams") or "0"))
+        if lot_remaining <= 0:
+            continue
+        unit_cost = Decimal(str(lot.get("unit_cost_usd") or "0"))
+        consumed = min(lot_remaining, remaining_sale)
+        cost_usd = money(consumed * unit_cost)
+        breakdown.append(
+            {
+                "source_id": int(lot.get("source_id") or 0),
+                "grams": str(consumed),
+                "unit_cost_usd": str(money(unit_cost)),
+                "cost_usd": str(cost_usd),
+            }
+        )
+        consumed_cost += cost_usd
+        consumed_grams += consumed
+        remaining_sale -= consumed
+
+    return {
+        "consumed_grams": consumed_grams,
+        "consumed_cost_usd": money(consumed_cost),
+        "shortfall_grams": remaining_sale if remaining_sale > 0 else Decimal("0"),
+        "breakdown": breakdown,
+    }
+
+
+def _compute_inventory_metrics(transactions: List[Dict[str, Any]]) -> Dict[str, Decimal]:
+    lots = _build_fifo_inventory_lots(transactions)
+    total_grams = sum((Decimal(str(lot.get("remaining_grams") or "0")) for lot in lots), Decimal("0"))
+    total_cost = sum(
+        (
+            Decimal(str(lot.get("remaining_grams") or "0"))
+            * Decimal(str(lot.get("unit_cost_usd") or "0"))
+            for lot in lots
+        ),
+        Decimal("0"),
+    )
+    avg_cost = money(total_cost / total_grams) if total_grams > 0 else Decimal("0")
+    return {
+        "available_grams": total_grams,
+        "inventory_cost_usd": money(total_cost),
+        "avg_cost_usd_per_gram": avg_cost,
+    }
+
+
+def _project_caixa_balances(
+    current_saldos: Dict[str, Any],
+    tipo_operacao: str,
+    peso_gramas: Decimal,
+    pagamentos: List[Dict[str, Any]],
+) -> Dict[str, Decimal]:
+    projected = {
+        moeda.upper(): Decimal(str(valor))
+        for moeda, valor in current_saldos.items()
+    }
+    for moeda in ["XAU", "USD", "EUR", "SRD", "BRL"]:
+        projected.setdefault(moeda, Decimal("0"))
+
+    if peso_gramas > 0:
+        projected["XAU"] += peso_gramas if tipo_operacao == "compra" else -peso_gramas
+
+    for pagamento in pagamentos:
+        moeda = str(pagamento.get("moeda") or "USD").upper()
+        valor_moeda = Decimal(str(pagamento.get("valor_moeda") or "0"))
+        if moeda not in projected or valor_moeda == 0:
+            continue
+        projected[moeda] += -valor_moeda if tipo_operacao == "compra" else valor_moeda
+
+    return projected
+
+
+def _find_negative_caixa_balances(projected_saldos: Dict[str, Decimal]) -> List[Tuple[str, Decimal]]:
+    negatives: List[Tuple[str, Decimal]] = []
+    for moeda in ["XAU", "USD", "EUR", "SRD", "BRL"]:
+        saldo = projected_saldos.get(moeda, Decimal("0"))
+        if saldo < 0:
+            negatives.append((moeda, saldo))
+    return negatives
+
+
+def _format_negative_caixa_lines(negatives: List[Tuple[str, Decimal]]) -> List[str]:
+    lines: List[str] = []
+    for moeda, saldo in negatives:
+        lines.append(f"- {moeda}: {_format_caixa_movement(moeda, saldo)}")
+    return lines
+
+
+def _should_reset_guided_session_for_message(message: str) -> bool:
+    text = _normalize_text(message)
+    if _looks_like_new_operation_start(message) or _is_greeting(message):
+        return True
+    global_commands = ["menu", "caixa", "extrato", "ajuda", "help", "taxa", "relatorio", "relatório"]
+    return any(text.startswith(cmd) for cmd in global_commands)
 
 
 def validate_webhook_token(token: Optional[str]) -> None:
@@ -905,7 +1096,10 @@ def _build_caixa_detail_response(
 
         lucro_venda: Optional[Decimal] = None
         if tipo == "venda" and isinstance(tx.get("contexto"), dict):
-            lucro_raw = tx.get("contexto", {}).get("lucro_ref_usd")
+            ctx_tx = cast(Dict[str, Any], tx.get("contexto") or {})
+            lucro_raw = ctx_tx.get("lucro_real_usd")
+            if lucro_raw is None:
+                lucro_raw = ctx_tx.get("lucro_ref_usd")
             if lucro_raw is not None:
                 try:
                     lucro_venda = Decimal(str(lucro_raw))
@@ -1667,16 +1861,18 @@ def _format_resumo(contexto: Dict[str, Any]) -> str:
 
     tipo_operacao = str(contexto.get("tipo_operacao") or "")
     pessoa_label = "Vendedor" if tipo_operacao == "compra" else "Comprador"
+    lucro_real_usd = contexto.get("lucro_real_usd")
+    custo_fifo_usd = contexto.get("custo_fifo_usd")
     lucro_ref_usd = contexto.get("lucro_ref_usd")
     preco_compra_ref_usd = contexto.get("preco_compra_ref_usd")
     lucro_linha = ""
     observacoes_idx = "10"
 
-    if tipo_operacao == "venda" and lucro_ref_usd is not None:
-        lucro_linha = (
-            f"10) Lucro ref.: USD {lucro_ref_usd} "
-            f"(custo-base: USD {preco_compra_ref_usd}/g)\n"
-        )
+    if tipo_operacao == "venda" and lucro_real_usd is not None:
+        lucro_linha = f"10) Lucro real (FIFO): USD {lucro_real_usd} (custo: USD {custo_fifo_usd})\n"
+        observacoes_idx = "11"
+    elif tipo_operacao == "venda" and lucro_ref_usd is not None:
+        lucro_linha = f"10) Lucro ref.: USD {lucro_ref_usd} (custo-base: USD {preco_compra_ref_usd}/g)\n"
         observacoes_idx = "11"
 
     if tipo_operacao == "compra":
@@ -2530,8 +2726,20 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
         return {"mensagem": resumo, "dados": {"etapa": "await_confirmacao", "preview": contexto}}
 
     if estado == "await_confirmacao":
-        confirm = _extract_confirmacao(mensagem)
+        text_confirm = _normalize_text(mensagem)
+        if contexto.get("risk_override_pending") and text_confirm in {"autorizar risco", "autorizar", "override"}:
+            contexto["risk_override_approved"] = True
+            contexto.pop("risk_override_pending", None)
+            _save_session(db, remetente, "await_confirmacao", contexto)
+            confirm = True
+        else:
+            confirm = _extract_confirmacao(mensagem)
         if confirm is None:
+            if contexto.get("risk_override_pending"):
+                return {
+                    "mensagem": "Responda: autorizar risco, não ou voltar.",
+                    "dados": {"etapa": estado, "risk_override_pending": True},
+                }
             return {"mensagem": "Digite apenas: sim ou não.", "dados": {"etapa": estado}}
 
         if not confirm:
@@ -2556,6 +2764,31 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
             _attach_sale_profit_reference(db, contexto)
 
         pagamentos = list(contexto.get("pagamentos", []))
+        projected = _project_caixa_balances(db.get_saldo_caixa(), tipo_operacao_confirm, peso, pagamentos)
+        negative_balances = _find_negative_caixa_balances(projected)
+        fifo_shortfall = Decimal(str(contexto.get("fifo_shortfall_grams", "0")))
+        risk_lines: List[str] = []
+        if negative_balances:
+            risk_lines.append("Saldos projetados negativos:")
+            risk_lines.extend(_format_negative_caixa_lines(negative_balances))
+        if fifo_shortfall > 0:
+            risk_lines.append(f"- Estoque FIFO insuficiente: faltam {fifo_shortfall} g")
+
+        if risk_lines and not contexto.get("risk_override_approved"):
+            usuario_confirm = db.get_usuario_by_telefone(remetente) or {}
+            is_admin_confirm = str(usuario_confirm.get("tipo_usuario", "")).lower() == "admin"
+            contexto["risk_override_pending"] = True
+            _save_session(db, remetente, "await_confirmacao", contexto)
+            if is_admin_confirm:
+                return {
+                    "mensagem": "⛔ Bloqueio de risco.\n" + "\n".join(risk_lines) + "\nResponda: autorizar risco, não ou voltar.",
+                    "dados": {"etapa": estado, "risk_override_pending": True, "risk_blocked": True},
+                }
+            return {
+                "mensagem": "⛔ Bloqueio de risco.\n" + "\n".join(risk_lines) + "\nSomente admin pode autorizar override. Use voltar ou cancelar.",
+                "dados": {"etapa": estado, "risk_blocked": True},
+            }
+
         header_payload: Dict[str, Any] = {
             "tipo_operacao": tipo_operacao_confirm,
             "origem": str(contexto.get("origem", "balcao")),
@@ -3177,6 +3410,102 @@ def daily_closure_report(date: Optional[str] = None) -> Dict[str, Any]:
     }
 
 
+@app.get("/reports/inventory-status")
+def inventory_status_report() -> Dict[str, Any]:
+        db = get_db()
+        txs = db.get_gold_inventory_transactions()
+        metrics = _compute_inventory_metrics(txs)
+        return {
+                "available_grams": str(metrics["available_grams"]),
+                "inventory_cost_usd": str(metrics["inventory_cost_usd"]),
+                "avg_cost_usd_per_gram": str(metrics["avg_cost_usd_per_gram"]),
+                "open_lots": len(_build_fifo_inventory_lots(txs)),
+        }
+
+
+@app.get("/admin/dashboard")
+def admin_dashboard(x_webhook_token: Optional[str] = Header(default=None)) -> Response:
+        validate_webhook_token(x_webhook_token)
+        db = get_db()
+        day = _build_day_range(None)
+        summary = db.get_daily_gold_summary(day["start"], day["end"])
+        alerts = db.get_risk_alerts(day["start"], day["end"])
+        divergences = db.get_top_divergences(day["start"], day["end"], limit=5)
+        saldo = db.get_saldo_caixa()
+        recent_runs = db.get_recent_multi_agent_runs(limit=5)
+        inventory = _compute_inventory_metrics(db.get_gold_inventory_transactions())
+
+        saldo_items = "".join(
+                f"<li><strong>{moeda}</strong>: {escape(_format_caixa_movement(moeda, Decimal(str(saldo.get(moeda, '0')))))}</li>"
+
+                for moeda in ["XAU", "USD", "EUR", "SRD", "BRL"]
+        )
+        alert_items = "".join(
+                f"<li>{escape(str(item.get('tipo_alerta', 'alerta')))} - {escape(str(item.get('descricao', item)))}</li>"
+                for item in alerts[:10]
+        ) or "<li>Sem alertas no dia.</li>"
+        divergence_items = "".join(
+                f"<li>ID {item.get('id')}: {escape(str(item.get('tipo_operacao', 'op')))} | diff USD {escape(str(item.get('diferenca_usd', '0')))} | operador {escape(str(item.get('operador_id', '')))}</li>"
+                for item in divergences
+        ) or "<li>Sem divergencias no dia.</li>"
+        run_items = "".join(
+                f"<li>{escape(str(item.get('criado_em', '')))} - {escape(str(item.get('objective', 'multi-agent')))}</li>"
+                for item in recent_runs
+        ) or "<li>Sem execucoes multiagente recentes.</li>"
+
+        html = f"""
+        <html>
+            <head>
+                <title>Caixa Admin Dashboard</title>
+                <style>
+                    body {{ font-family: Segoe UI, Arial, sans-serif; margin: 24px; color: #111; }}
+                    h1, h2 {{ margin-bottom: 8px; }}
+                    .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px; }}
+                    .card {{ border: 1px solid #ddd; border-radius: 10px; padding: 16px; background: #fafafa; }}
+                    ul {{ padding-left: 18px; }}
+                    .kpi {{ font-size: 20px; font-weight: 700; }}
+                </style>
+            </head>
+            <body>
+                <h1>Caixa Admin Dashboard</h1>
+                <p>Data: {escape(day['date'])}</p>
+                <div class="grid">
+                    <div class="card">
+                        <h2>Resumo Diario</h2>
+                        <div class="kpi">Operacoes: {escape(str(summary.get('total_operacoes', 0)))}</div>
+                        <p>Total USD: {escape(str(summary.get('total_usd', '0')))}</p>
+                        <p>Total pago USD: {escape(str(summary.get('total_pago_usd', '0')))}</p>
+                        <p>Diferenca USD: {escape(str(summary.get('total_diferenca_usd', '0')))}</p>
+                    </div>
+                    <div class="card">
+                        <h2>Estoque Ouro</h2>
+                        <p>Disponivel: {escape(str(inventory['available_grams']))} g</p>
+                        <p>Custo FIFO aberto: USD {escape(str(inventory['inventory_cost_usd']))}</p>
+                        <p>Custo medio aberto: USD {escape(str(inventory['avg_cost_usd_per_gram']))}/g</p>
+                    </div>
+                    <div class="card">
+                        <h2>Saldos dos 5 Caixas</h2>
+                        <ul>{saldo_items}</ul>
+                    </div>
+                    <div class="card">
+                        <h2>Alertas de Risco</h2>
+                        <ul>{alert_items}</ul>
+                    </div>
+                    <div class="card">
+                        <h2>Top Divergencias</h2>
+                        <ul>{divergence_items}</ul>
+                    </div>
+                    <div class="card">
+                        <h2>Runs Multiagente</h2>
+                        <ul>{run_items}</ul>
+                    </div>
+                </div>
+            </body>
+        </html>
+        """
+        return Response(content=html, media_type="text/html")
+
+
 @app.get("/reports/risk-alerts")
 def risk_alerts_report(date: Optional[str] = None) -> Dict[str, Any]:
     db = get_db()
@@ -3722,7 +4051,11 @@ def _processar_webhook(
     if session:
         estado = str(session.get("estado", ""))
         if estado in _GUIDED_FLOW_STATES:
-            if estado != "await_resume_confirmacao" and _is_guided_session_stale(session):
+            if _should_reset_guided_session_for_message(mensagem):
+                _clear_session(db, remetente)
+                session = None
+                estado = ""
+            elif estado != "await_resume_confirmacao" and _is_guided_session_stale(session):
                 if mensagem_norm in {"cancelar", "cancela", "cancel", "parar", "sair"}:
                     _clear_session(db, remetente)
                     return {
@@ -3751,7 +4084,7 @@ def _processar_webhook(
                 }
 
             # If user sends a fresh operation sentence, reset stale flow and re-interpret.
-            if _looks_like_new_operation_start(mensagem):
+            if _should_reset_guided_session_for_message(mensagem):
                 _clear_session(db, remetente)
             else:
                 return _process_guided_flow(remetente, mensagem, db, session)

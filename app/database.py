@@ -245,6 +245,20 @@ class DatabaseClient:
         data = cast(List[Dict[str, Any]], response.data or [])
         return data[0] if data else None
 
+    def get_gold_inventory_transactions(self, end_iso: Optional[str] = None) -> List[Dict[str, Any]]:
+        try:
+            query = (
+                self.client.table("gold_transactions")
+                .select("id,tipo_operacao,peso,preco_usd,criado_em,contexto")
+                .order("criado_em", desc=False)
+            )
+            if end_iso:
+                query = query.lt("criado_em", end_iso)
+            response = query.execute()
+            return cast(List[Dict[str, Any]], response.data or [])
+        except Exception:
+            return []
+
     def insert_transacao(
         self,
         tipo_operacao: str,
