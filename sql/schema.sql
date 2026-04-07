@@ -254,7 +254,8 @@ ON CONFLICT (nome) DO NOTHING;
 INSERT INTO usuarios (nome, telefone, tipo_usuario)
 VALUES
     ('Administrador', '+59700000000', 'admin'),
-    ('Operador 1', '+59711111111', 'operador')
+    ('Operador 1', '+59711111111', 'operador'),
+    ('Operador Teste 2', '+5978145515', 'operador')
 ON CONFLICT (telefone) DO NOTHING;
 
 -- =============================
