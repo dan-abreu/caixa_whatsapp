@@ -259,6 +259,158 @@ class DatabaseClient:
         except Exception:
             return []
 
+    def sync_gold_inventory_ledger(self) -> Dict[str, Any]:
+        transactions = self.get_gold_inventory_transactions()
+        lots_state: List[Dict[str, Any]] = []
+        lot_rows: List[Dict[str, Any]] = []
+        consumption_rows: List[Dict[str, Any]] = []
+
+        for tx in transactions:
+            try:
+                tx_id = int(tx.get("id") or 0)
+                tipo = str(tx.get("tipo_operacao") or "").lower()
+                peso = Decimal(str(tx.get("peso") or "0"))
+                preco_usd = Decimal(str(tx.get("preco_usd") or "0"))
+                criado_em = str(tx.get("criado_em") or datetime.now(timezone.utc).isoformat())
+            except Exception:
+                continue
+
+            if tx_id <= 0 or peso <= 0 or tipo not in {"compra", "venda"}:
+                continue
+
+            if tipo == "compra":
+                lot_rows.append(
+                    {
+                        "source_transaction_id": tx_id,
+                        "origem_tipo": tipo,
+                        "created_at_tx": criado_em,
+                        "initial_grams": str(peso),
+                        "remaining_grams": str(peso),
+                        "unit_cost_usd": str(preco_usd),
+                        "total_cost_usd": str(peso * preco_usd),
+                        "status": "open",
+                        "metadata": {"source": "sync", "tx_id": tx_id},
+                    }
+                )
+                lots_state.append(
+                    {
+                        "source_transaction_id": tx_id,
+                        "created_at_tx": criado_em,
+                        "remaining_grams": peso,
+                        "unit_cost_usd": preco_usd,
+                    }
+                )
+                continue
+
+            remaining_sale = peso
+            for lot in lots_state:
+                if remaining_sale <= 0:
+                    break
+                lot_remaining = Decimal(str(lot.get("remaining_grams") or "0"))
+                if lot_remaining <= 0:
+                    continue
+                consumed = min(lot_remaining, remaining_sale)
+                unit_cost = Decimal(str(lot.get("unit_cost_usd") or "0"))
+                consumption_rows.append(
+                    {
+                        "sale_transaction_id": tx_id,
+                        "lot_source_transaction_id": int(lot.get("source_transaction_id") or 0),
+                        "consumed_grams": str(consumed),
+                        "unit_cost_usd": str(unit_cost),
+                        "consumed_cost_usd": str(consumed * unit_cost),
+                        "created_at_sale": criado_em,
+                        "metadata": {"source": "sync", "sale_tx_id": tx_id},
+                    }
+                )
+                lot["remaining_grams"] = lot_remaining - consumed
+                remaining_sale -= consumed
+
+        try:
+            self.client.table("gold_inventory_consumptions").delete().neq("id", 0).execute()
+        except Exception:
+            pass
+        try:
+            self.client.table("gold_inventory_lots").delete().neq("id", 0).execute()
+        except Exception:
+            pass
+
+        persisted_lots: Dict[int, int] = {}
+        for row in lot_rows:
+            source_tx_id = int(row["source_transaction_id"])
+            remaining = next(
+                (
+                    Decimal(str(lot.get("remaining_grams") or "0"))
+                    for lot in lots_state
+                    if int(lot.get("source_transaction_id") or 0) == source_tx_id
+                ),
+                Decimal("0"),
+            )
+            row["remaining_grams"] = str(remaining)
+            row["status"] = "open" if remaining > 0 else "consumed"
+            try:
+                resp = self.client.table("gold_inventory_lots").insert(row).execute()
+                data = cast(List[Dict[str, Any]], resp.data or [])
+                if data:
+                    persisted_lots[source_tx_id] = int(data[0].get("id") or 0)
+            except Exception:
+                continue
+
+        for row in consumption_rows:
+            lot_id = persisted_lots.get(int(row.pop("lot_source_transaction_id", 0) or 0))
+            if not lot_id:
+                continue
+            row["lot_id"] = lot_id
+            try:
+                self.client.table("gold_inventory_consumptions").insert(row).execute()
+            except Exception:
+                continue
+
+        open_grams = sum(
+            (Decimal(str(lot.get("remaining_grams") or "0")) for lot in lots_state),
+            Decimal("0"),
+        )
+        return {
+            "lots": len(lot_rows),
+            "consumptions": len(consumption_rows),
+            "open_grams": str(open_grams),
+        }
+
+    def get_gold_inventory_status(self) -> Dict[str, Any]:
+        try:
+            lots_resp = (
+                self.client.table("gold_inventory_lots")
+                .select("id,source_transaction_id,created_at_tx,initial_grams,remaining_grams,unit_cost_usd,total_cost_usd,status")
+                .order("created_at_tx", desc=False)
+                .execute()
+            )
+            lots = cast(List[Dict[str, Any]], lots_resp.data or [])
+            open_lots = [lot for lot in lots if str(lot.get("status") or "") == "open"]
+            available_grams = sum((Decimal(str(lot.get("remaining_grams") or "0")) for lot in open_lots), Decimal("0"))
+            open_cost = sum(
+                (
+                    Decimal(str(lot.get("remaining_grams") or "0"))
+                    * Decimal(str(lot.get("unit_cost_usd") or "0"))
+                    for lot in open_lots
+                ),
+                Decimal("0"),
+            )
+            avg_cost = (open_cost / available_grams) if available_grams > 0 else Decimal("0")
+            return {
+                "lots": lots,
+                "open_lots": open_lots,
+                "available_grams": str(available_grams),
+                "inventory_cost_usd": str(open_cost.quantize(Decimal("0.01"))),
+                "avg_cost_usd_per_gram": str(avg_cost.quantize(Decimal("0.01"))),
+            }
+        except Exception:
+            return {
+                "lots": [],
+                "open_lots": [],
+                "available_grams": "0",
+                "inventory_cost_usd": "0.00",
+                "avg_cost_usd_per_gram": "0.00",
+            }
+
     def insert_transacao(
         self,
         tipo_operacao: str,
@@ -691,6 +843,8 @@ class DatabaseClient:
                 },
                 lines=journal_lines,
             )
+
+            self.sync_gold_inventory_ledger()
 
             return header
         except Exception:
@@ -1506,7 +1660,16 @@ class DatabaseClient:
             )
             payments = cast(List[Dict[str, Any]], payments_response.data or [])
 
-            return {"operation": header, "payments": payments}
+            consumptions_response = (
+                self.client.table("gold_inventory_consumptions")
+                .select("id,sale_transaction_id,lot_id,consumed_grams,unit_cost_usd,consumed_cost_usd,created_at_sale,metadata")
+                .eq("sale_transaction_id", operation_id)
+                .order("id", desc=False)
+                .execute()
+            )
+            consumptions = cast(List[Dict[str, Any]], consumptions_response.data or [])
+
+            return {"operation": header, "payments": payments, "inventory_consumptions": consumptions}
         except Exception:
             return None
 

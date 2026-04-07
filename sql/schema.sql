@@ -576,6 +576,50 @@ CREATE TABLE IF NOT EXISTS gold_audit_log (
 CREATE INDEX IF NOT EXISTS idx_gold_audit_log_tabela_registro
     ON gold_audit_log (tabela, registro_id, criado_em DESC);
 
+CREATE TABLE IF NOT EXISTS gold_inventory_lots (
+    id BIGSERIAL PRIMARY KEY,
+    source_transaction_id BIGINT NOT NULL REFERENCES gold_transactions(id) ON DELETE CASCADE,
+    origem_tipo VARCHAR(20) NOT NULL,
+    created_at_tx TIMESTAMPTZ NOT NULL,
+    initial_grams NUMERIC(18, 6) NOT NULL,
+    remaining_grams NUMERIC(18, 6) NOT NULL,
+    unit_cost_usd NUMERIC(18, 6) NOT NULL,
+    total_cost_usd NUMERIC(18, 6) NOT NULL,
+    status VARCHAR(20) NOT NULL DEFAULT 'open',
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    criado_em TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT chk_gold_inventory_lots_positive
+        CHECK (initial_grams > 0 AND remaining_grams >= 0 AND unit_cost_usd >= 0 AND total_cost_usd >= 0),
+    CONSTRAINT chk_gold_inventory_lots_status
+        CHECK (status IN ('open', 'consumed'))
+);
+
+CREATE TABLE IF NOT EXISTS gold_inventory_consumptions (
+    id BIGSERIAL PRIMARY KEY,
+    sale_transaction_id BIGINT NOT NULL REFERENCES gold_transactions(id) ON DELETE CASCADE,
+    lot_id BIGINT NOT NULL REFERENCES gold_inventory_lots(id) ON DELETE CASCADE,
+    consumed_grams NUMERIC(18, 6) NOT NULL,
+    unit_cost_usd NUMERIC(18, 6) NOT NULL,
+    consumed_cost_usd NUMERIC(18, 6) NOT NULL,
+    created_at_sale TIMESTAMPTZ NOT NULL,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    criado_em TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT chk_gold_inventory_consumptions_positive
+        CHECK (consumed_grams > 0 AND unit_cost_usd >= 0 AND consumed_cost_usd >= 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_gold_inventory_lots_open
+    ON gold_inventory_lots (status, created_at_tx ASC);
+
+CREATE INDEX IF NOT EXISTS idx_gold_inventory_lots_source
+    ON gold_inventory_lots (source_transaction_id);
+
+CREATE INDEX IF NOT EXISTS idx_gold_inventory_consumptions_sale
+    ON gold_inventory_consumptions (sale_transaction_id, criado_em DESC);
+
+CREATE INDEX IF NOT EXISTS idx_gold_inventory_consumptions_lot
+    ON gold_inventory_consumptions (lot_id, criado_em DESC);
+
 CREATE OR REPLACE FUNCTION fn_audit_gold_changes()
 RETURNS trigger
 LANGUAGE plpgsql

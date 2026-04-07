@@ -3412,98 +3412,131 @@ def daily_closure_report(date: Optional[str] = None) -> Dict[str, Any]:
 
 @app.get("/reports/inventory-status")
 def inventory_status_report() -> Dict[str, Any]:
-        db = get_db()
-        txs = db.get_gold_inventory_transactions()
-        metrics = _compute_inventory_metrics(txs)
+    db = get_db()
+    inventory = db.get_gold_inventory_status()
+    if not inventory.get("lots"):
+        db.sync_gold_inventory_ledger()
+        inventory = db.get_gold_inventory_status()
+
+    if inventory.get("lots"):
         return {
-                "available_grams": str(metrics["available_grams"]),
-                "inventory_cost_usd": str(metrics["inventory_cost_usd"]),
-                "avg_cost_usd_per_gram": str(metrics["avg_cost_usd_per_gram"]),
-                "open_lots": len(_build_fifo_inventory_lots(txs)),
+            "available_grams": str(inventory.get("available_grams", "0")),
+            "inventory_cost_usd": str(inventory.get("inventory_cost_usd", "0.00")),
+            "avg_cost_usd_per_gram": str(inventory.get("avg_cost_usd_per_gram", "0.00")),
+            "open_lots": len(cast(List[Dict[str, Any]], inventory.get("open_lots") or [])),
+            "ledger_mode": "persisted",
+            "lots": inventory.get("open_lots", []),
         }
+
+    txs = db.get_gold_inventory_transactions()
+    metrics = _compute_inventory_metrics(txs)
+    return {
+        "available_grams": str(metrics["available_grams"]),
+        "inventory_cost_usd": str(metrics["inventory_cost_usd"]),
+        "avg_cost_usd_per_gram": str(metrics["avg_cost_usd_per_gram"]),
+        "open_lots": len(_build_fifo_inventory_lots(txs)),
+        "ledger_mode": "reconstructed",
+        "lots": _build_fifo_inventory_lots(txs),
+    }
 
 
 @app.get("/admin/dashboard")
 def admin_dashboard(x_webhook_token: Optional[str] = Header(default=None)) -> Response:
-        validate_webhook_token(x_webhook_token)
-        db = get_db()
-        day = _build_day_range(None)
-        summary = db.get_daily_gold_summary(day["start"], day["end"])
-        alerts = db.get_risk_alerts(day["start"], day["end"])
-        divergences = db.get_top_divergences(day["start"], day["end"], limit=5)
-        saldo = db.get_saldo_caixa()
-        recent_runs = db.get_recent_multi_agent_runs(limit=5)
-        inventory = _compute_inventory_metrics(db.get_gold_inventory_transactions())
+    validate_webhook_token(x_webhook_token)
+    db = get_db()
+    day = _build_day_range(None)
+    summary = db.get_daily_gold_summary(day["start"], day["end"])
+    alerts = db.get_risk_alerts(day["start"], day["end"])
+    divergences = db.get_top_divergences(day["start"], day["end"], limit=5)
+    saldo = db.get_saldo_caixa()
+    recent_runs = db.get_recent_multi_agent_runs(limit=5)
+    inventory = db.get_gold_inventory_status()
+    if not inventory.get("lots"):
+        db.sync_gold_inventory_ledger()
+        inventory = db.get_gold_inventory_status()
 
-        saldo_items = "".join(
-                f"<li><strong>{moeda}</strong>: {escape(_format_caixa_movement(moeda, Decimal(str(saldo.get(moeda, '0')))))}</li>"
+    if not inventory.get("lots"):
+        fallback_metrics = _compute_inventory_metrics(db.get_gold_inventory_transactions())
+        inventory = {
+            "available_grams": str(fallback_metrics["available_grams"]),
+            "inventory_cost_usd": str(fallback_metrics["inventory_cost_usd"]),
+            "avg_cost_usd_per_gram": str(fallback_metrics["avg_cost_usd_per_gram"]),
+            "open_lots": _build_fifo_inventory_lots(db.get_gold_inventory_transactions()),
+        }
 
-                for moeda in ["XAU", "USD", "EUR", "SRD", "BRL"]
-        )
-        alert_items = "".join(
-                f"<li>{escape(str(item.get('tipo_alerta', 'alerta')))} - {escape(str(item.get('descricao', item)))}</li>"
-                for item in alerts[:10]
-        ) or "<li>Sem alertas no dia.</li>"
-        divergence_items = "".join(
-                f"<li>ID {item.get('id')}: {escape(str(item.get('tipo_operacao', 'op')))} | diff USD {escape(str(item.get('diferenca_usd', '0')))} | operador {escape(str(item.get('operador_id', '')))}</li>"
-                for item in divergences
-        ) or "<li>Sem divergencias no dia.</li>"
-        run_items = "".join(
-                f"<li>{escape(str(item.get('criado_em', '')))} - {escape(str(item.get('objective', 'multi-agent')))}</li>"
-                for item in recent_runs
-        ) or "<li>Sem execucoes multiagente recentes.</li>"
+    saldo_items = "".join(
+        f"<li><strong>{moeda}</strong>: {escape(_format_caixa_movement(moeda, Decimal(str(saldo.get(moeda, '0')))))}</li>"
+        for moeda in ["XAU", "USD", "EUR", "SRD", "BRL"]
+    )
+    alert_items = "".join(
+        f"<li>{escape(str(item.get('tipo_alerta', 'alerta')))} - {escape(str(item.get('descricao', item)))}</li>"
+        for item in alerts[:10]
+    ) or "<li>Sem alertas no dia.</li>"
+    divergence_items = "".join(
+        f"<li>ID {item.get('id')}: {escape(str(item.get('tipo_operacao', 'op')))} | diff USD {escape(str(item.get('diferenca_usd', '0')))} | operador {escape(str(item.get('operador_id', '')))}</li>"
+        for item in divergences
+    ) or "<li>Sem divergencias no dia.</li>"
+    run_items = "".join(
+        f"<li>{escape(str(item.get('criado_em', '')))} - {escape(str(item.get('objective', 'multi-agent')))}</li>"
+        for item in recent_runs
+    ) or "<li>Sem execucoes multiagente recentes.</li>"
+    lot_items = "".join(
+        f"<li>Lote tx {escape(str(item.get('source_transaction_id', '')))}: {escape(str(item.get('remaining_grams', '0')))} g a USD {escape(str(item.get('unit_cost_usd', '0')))}</li>"
+        for item in cast(List[Dict[str, Any]], inventory.get("open_lots") or [])[:8]
+    ) or "<li>Sem lotes abertos.</li>"
 
-        html = f"""
-        <html>
-            <head>
-                <title>Caixa Admin Dashboard</title>
-                <style>
-                    body {{ font-family: Segoe UI, Arial, sans-serif; margin: 24px; color: #111; }}
-                    h1, h2 {{ margin-bottom: 8px; }}
-                    .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px; }}
-                    .card {{ border: 1px solid #ddd; border-radius: 10px; padding: 16px; background: #fafafa; }}
-                    ul {{ padding-left: 18px; }}
-                    .kpi {{ font-size: 20px; font-weight: 700; }}
-                </style>
-            </head>
-            <body>
-                <h1>Caixa Admin Dashboard</h1>
-                <p>Data: {escape(day['date'])}</p>
-                <div class="grid">
-                    <div class="card">
-                        <h2>Resumo Diario</h2>
-                        <div class="kpi">Operacoes: {escape(str(summary.get('total_operacoes', 0)))}</div>
-                        <p>Total USD: {escape(str(summary.get('total_usd', '0')))}</p>
-                        <p>Total pago USD: {escape(str(summary.get('total_pago_usd', '0')))}</p>
-                        <p>Diferenca USD: {escape(str(summary.get('total_diferenca_usd', '0')))}</p>
-                    </div>
-                    <div class="card">
-                        <h2>Estoque Ouro</h2>
-                        <p>Disponivel: {escape(str(inventory['available_grams']))} g</p>
-                        <p>Custo FIFO aberto: USD {escape(str(inventory['inventory_cost_usd']))}</p>
-                        <p>Custo medio aberto: USD {escape(str(inventory['avg_cost_usd_per_gram']))}/g</p>
-                    </div>
-                    <div class="card">
-                        <h2>Saldos dos 5 Caixas</h2>
-                        <ul>{saldo_items}</ul>
-                    </div>
-                    <div class="card">
-                        <h2>Alertas de Risco</h2>
-                        <ul>{alert_items}</ul>
-                    </div>
-                    <div class="card">
-                        <h2>Top Divergencias</h2>
-                        <ul>{divergence_items}</ul>
-                    </div>
-                    <div class="card">
-                        <h2>Runs Multiagente</h2>
-                        <ul>{run_items}</ul>
-                    </div>
+    html = f"""
+    <html>
+        <head>
+            <title>Caixa Admin Dashboard</title>
+            <style>
+                body {{ font-family: Segoe UI, Arial, sans-serif; margin: 24px; color: #111; }}
+                h1, h2 {{ margin-bottom: 8px; }}
+                .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px; }}
+                .card {{ border: 1px solid #ddd; border-radius: 10px; padding: 16px; background: #fafafa; }}
+                ul {{ padding-left: 18px; }}
+                .kpi {{ font-size: 20px; font-weight: 700; }}
+            </style>
+        </head>
+        <body>
+            <h1>Caixa Admin Dashboard</h1>
+            <p>Data: {escape(day['date'])}</p>
+            <div class="grid">
+                <div class="card">
+                    <h2>Resumo Diario</h2>
+                    <div class="kpi">Operacoes: {escape(str(summary.get('total_operacoes', 0)))}</div>
+                    <p>Total USD: {escape(str(summary.get('total_usd', '0')))}</p>
+                    <p>Total pago USD: {escape(str(summary.get('total_pago_usd', '0')))}</p>
+                    <p>Diferenca USD: {escape(str(summary.get('total_diferenca_usd', '0')))}</p>
                 </div>
-            </body>
-        </html>
-        """
-        return Response(content=html, media_type="text/html")
+                <div class="card">
+                    <h2>Estoque Ouro</h2>
+                    <p>Disponivel: {escape(str(inventory['available_grams']))} g</p>
+                    <p>Custo FIFO aberto: USD {escape(str(inventory['inventory_cost_usd']))}</p>
+                    <p>Custo medio aberto: USD {escape(str(inventory['avg_cost_usd_per_gram']))}/g</p>
+                    <ul>{lot_items}</ul>
+                </div>
+                <div class="card">
+                    <h2>Saldos dos 5 Caixas</h2>
+                    <ul>{saldo_items}</ul>
+                </div>
+                <div class="card">
+                    <h2>Alertas de Risco</h2>
+                    <ul>{alert_items}</ul>
+                </div>
+                <div class="card">
+                    <h2>Top Divergencias</h2>
+                    <ul>{divergence_items}</ul>
+                </div>
+                <div class="card">
+                    <h2>Runs Multiagente</h2>
+                    <ul>{run_items}</ul>
+                </div>
+            </div>
+        </body>
+    </html>
+    """
+    return Response(content=html, media_type="text/html")
 
 
 @app.get("/reports/risk-alerts")
