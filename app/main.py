@@ -4258,9 +4258,18 @@ async def saas_profile_pin(request: Request) -> Response:
     if not db.verify_usuario_web_pin(str(session_user.get("telefone") or ""), current_pin):
         html = _render_saas_dashboard_html(db, session_user, notice="PIN atual inválido.", notice_kind="error")
         return Response(content=html, media_type="text/html", status_code=401)
-    if not db.set_usuario_web_pin(str(session_user.get("telefone") or ""), validated_new_pin):
+    update_result = db.set_usuario_web_pin(str(session_user.get("telefone") or ""), validated_new_pin)
+    if not update_result:
         html = _render_saas_dashboard_html(db, session_user, notice="Não foi possível atualizar o PIN.", notice_kind="error")
         return Response(content=html, media_type="text/html", status_code=500)
+    if not bool(update_result.get("web_pin_schema_ready", True)):
+        html = _render_saas_dashboard_html(
+            db,
+            session_user,
+            notice="Troca de PIN indisponível: aplique a migração do banco que adiciona web_pin_hash e web_pin_updated_em na tabela usuarios.",
+            notice_kind="error",
+        )
+        return Response(content=html, media_type="text/html", status_code=409)
 
     refreshed_user = db.get_usuario_web_auth(str(session_user.get("telefone") or "")) or session_user
     response = Response(content=_render_saas_dashboard_html(db, refreshed_user, notice="PIN web atualizado com sucesso."), media_type="text/html")

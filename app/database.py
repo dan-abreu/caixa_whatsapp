@@ -211,7 +211,10 @@ class DatabaseClient:
                 .execute()
             )
             data = cast(List[Dict[str, Any]], response.data or [])
-            return data[0] if data else None
+            enriched = dict(data[0]) if data else None
+            if enriched is not None:
+                enriched["web_pin_schema_ready"] = True
+            return enriched
         except Exception:
             usuario = self.get_usuario_by_telefone(telefone)
             if not usuario:
@@ -219,6 +222,7 @@ class DatabaseClient:
             fallback = dict(usuario)
             fallback["web_pin_hash"] = None
             fallback["web_pin_updated_em"] = None
+            fallback["web_pin_schema_ready"] = False
             return fallback
 
     def verify_usuario_web_pin(self, telefone: str, pin: str) -> Optional[Dict[str, Any]]:
@@ -257,9 +261,17 @@ class DatabaseClient:
                 .execute()
             )
             data = cast(List[Dict[str, Any]], response.data or [])
-            return data[0] if data else None
-        except Exception:
-            return None
+            if data:
+                updated = dict(data[0])
+                updated["web_pin_schema_ready"] = True
+                return updated
+            return {"telefone": telefone, "web_pin_schema_ready": True}
+        except Exception as exc:
+            return {
+                "telefone": telefone,
+                "web_pin_schema_ready": False,
+                "error": str(exc),
+            }
 
     def get_last_cambio_para_usd(self, moeda: str) -> Optional[Decimal]:
         moeda_up = moeda.upper()
