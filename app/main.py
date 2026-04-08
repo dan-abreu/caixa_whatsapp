@@ -1,4 +1,8 @@
+import json
 import os
+import hmac
+import base64
+import hashlib
 import logging
 import re
 import unicodedata
@@ -49,6 +53,10 @@ class AIExtractedData(BaseModel):
 app = FastAPI(title="Caixa Inteligente WhatsApp API", version="1.0.0")
 logger = logging.getLogger("caixa_whatsapp")
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+
+_SAAS_SESSION_COOKIE = os.getenv("SAAS_SESSION_COOKIE", "caixa_saas_session")
+_SAAS_SESSION_TTL_SECONDS = int(os.getenv("SAAS_SESSION_TTL_SECONDS", "43200"))
+_SAAS_COOKIE_SECURE = os.getenv("SAAS_COOKIE_SECURE", "false").strip().lower() in {"1", "true", "yes"}
 
 
 def get_db() -> DatabaseClient:
@@ -635,7 +643,12 @@ def _parse_decimal_from_text(value: str, field_name: str) -> Decimal:
     cleaned = value.strip().replace(" ", "")
     cleaned = cleaned.replace(",", ".")
     cleaned = re.sub(r"[^0-9.\-]", "", cleaned)
-    return parse_decimal(cleaned, field_name)
+    if cleaned in {"", "-", ".", "-.", ".-"}:
+        return Decimal("-1")
+    try:
+        return parse_decimal(cleaned, field_name)
+    except HTTPException:
+        return Decimal("-1")
 
 
 def _extract_confirmacao(value: str) -> Optional[bool]:
@@ -1166,6 +1179,753 @@ def _build_caixa_detail_response(
     }
 
 
+def _persist_gold_operation_from_context(
+    db: DatabaseClient,
+    remetente: str,
+    contexto: Dict[str, Any],
+    post_save_session: bool = True,
+) -> Dict[str, Any]:
+    ativo = db.get_ativo_by_nome("Ouro")
+    if not ativo:
+        ativo = db.get_ativo_by_nome("Ouro 24k")
+    if not ativo:
+        raise HTTPException(status_code=404, detail="Ativo não encontrado")
+
+    ativo_id = int(ativo["id"])
+    peso = Decimal(str(contexto.get("peso")))
+    preco = Decimal(str(contexto.get("preco_usd")))
+    total = money(peso * preco)
+    total_pago = Decimal(str(contexto.get("total_pago_usd", "0")))
+    diferenca = money(total - total_pago)
+    risco_diferenca = abs(diferenca) >= _RISK_DIFF_LIMIT_USD
+    tipo_operacao = str(contexto.get("tipo_operacao", "compra"))
+    if tipo_operacao == "venda":
+        _attach_sale_profit_reference(db, contexto)
+
+    pagamentos = list(contexto.get("pagamentos", []))
+    header_payload: Dict[str, Any] = {
+        "tipo_operacao": tipo_operacao,
+        "origem": str(contexto.get("origem", "balcao")),
+        "gold_type": "fundido",
+        "quebra": None,
+        "teor": contexto.get("teor"),
+        "peso": str(peso),
+        "preco_usd": str(money(preco)),
+        "total_usd": str(total),
+        "total_pago_usd": str(money(total_pago)),
+        "diferenca_usd": str(diferenca),
+        "fechamento_gramas": contexto.get("fechamento_gramas"),
+        "fechamento_tipo": str(contexto.get("fechamento_tipo", "parcial")),
+        "pessoa": str(contexto.get("pessoa", "")),
+        "forma_pagamento": str(contexto.get("forma_pagamento", "dinheiro")),
+        "observacoes": contexto.get("observacoes", ""),
+        "operador_id": remetente,
+        "source_message_id": contexto.get("source_message_id"),
+        "contexto": contexto,
+        "criado_em": datetime.now(timezone.utc).isoformat(),
+    }
+
+    gold_transaction = db.insert_gold_transaction(
+        payload=header_payload,
+        pagamentos=pagamentos,
+    )
+
+    transacao = db.insert_transacao(
+        tipo_operacao=tipo_operacao,
+        ativo_id=ativo_id,
+        quantidade=peso,
+        cotacao_usada=preco,
+        valor_total=total,
+        operador_id=remetente,
+        source_message_id=contexto.get("source_message_id"),
+        status="registrada",
+    )
+
+    db.insert_log(
+        nivel="info",
+        remetente=remetente,
+        mensagem_recebida="CONFIRMACAO_FLUXO_GUIADO",
+        resposta_enviada="Fluxo guiado confirmado",
+        contexto=contexto,
+    )
+    if risco_diferenca:
+        db.insert_log(
+            nivel="warning",
+            remetente=remetente,
+            mensagem_recebida="ALERTA_RISCO_DIFERENCA",
+            contexto={
+                "intencao": "alerta_risco",
+                "tipo": "diferenca_alta",
+                "limite_usd": str(_RISK_DIFF_LIMIT_USD),
+                "diferenca_usd": str(diferenca),
+                "tipo_operacao": contexto.get("tipo_operacao"),
+            },
+            erro="Diferença de caixa acima do limite",
+        )
+
+    review_payload: Optional[Dict[str, Any]] = None
+    review_transaction: Dict[str, Any] = {
+        "tipo_operacao": tipo_operacao,
+        "origem": str(contexto.get("origem", "balcao")),
+        "teor": contexto.get("teor"),
+        "peso": str(peso),
+        "preco_usd": str(money(preco)),
+        "total_usd": str(total),
+        "total_pago_usd": str(money(total_pago)),
+        "diferenca_usd": str(diferenca),
+        "fechamento_gramas": contexto.get("fechamento_gramas"),
+        "forma_pagamento": str(contexto.get("forma_pagamento", "dinheiro")),
+        "pagamentos": pagamentos,
+        "transacao_id": transacao.get("id"),
+    }
+    if _should_trigger_multi_agent_review(review_transaction, force=risco_diferenca):
+        review_payload = _run_automatic_multi_agent_review(
+            db,
+            objective="avaliacao automatica de operacao enterprise",
+            transaction=review_transaction,
+            operation_id=gold_transaction.get("id") if isinstance(gold_transaction, dict) else None,
+            operation_kind="gold_transaction",
+            source_message_id=contexto.get("source_message_id"),
+        )
+
+    if post_save_session:
+        _save_session(db, remetente, "await_caixa_detalhe", {"source": "post_operacao"})
+
+    alerta = "" if not risco_diferenca else " ⚠️ Atenção: verificar diferença."
+    gt_id = gold_transaction.get("id") if isinstance(gold_transaction, dict) else None
+    tx_id = transacao.get("id")
+    if gt_id:
+        id_linha = f"ID: GT-{gt_id}\n"
+    elif tx_id:
+        id_linha = f"ID: T-{tx_id}\n"
+    else:
+        id_linha = ""
+
+    caixa_resp = _build_caixa_response(db)
+    caixa_msg = str(caixa_resp.get("mensagem", ""))
+    direcao_txt = "Saiu" if tipo_operacao == "compra" else "Entrou"
+    direcao_ouro_txt = "Entrou" if tipo_operacao == "compra" else "Saiu"
+    mov_linhas: List[str] = [f"- {direcao_ouro_txt} ouro: {peso:,.3f}g"]
+    for pagamento in pagamentos:
+        moeda_pg = str(pagamento.get("moeda", "USD")).upper()
+        valor_moeda_pg = Decimal(str(pagamento.get("valor_moeda", "0")))
+        mov_linhas.append(f"- {direcao_txt} {moeda_pg}: {money(valor_moeda_pg)}")
+    mov_txt = "\n".join(mov_linhas) if mov_linhas else "- Sem movimentação registrada"
+
+    response_payload: Dict[str, Any] = {
+        "mensagem": (
+            f"✅ Operação salva com sucesso.\n"
+            f"{id_linha}"
+            f"Tipo: {tipo_operacao}\n"
+            f"Peso: {peso:,.3f}g\n"
+            "Movimentação dos 5 caixas:\n"
+            f"{mov_txt}{alerta}\n"
+            "════════════════════════════════\n"
+            f"{caixa_msg}"
+        ),
+        "dados": {
+            "intencao": "fluxo_guiado_confirmado",
+            "tipo_operacao": contexto.get("tipo_operacao"),
+            "peso": str(peso),
+            "pagamentos": pagamentos,
+            "gold_transaction_id": gt_id,
+            "transacao_id": tx_id,
+        },
+    }
+    if review_payload:
+        response_payload["dados"]["analise_multiagente"] = review_payload
+    return response_payload
+
+
+def _normalize_user_phone(raw: str) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    digits = "".join(ch for ch in text if ch.isdigit())
+    if not digits:
+        return ""
+    return f"+{digits}"
+
+
+def _validate_web_pin_format(pin: str) -> str:
+    normalized = str(pin or "").strip()
+    if not re.fullmatch(r"\d{4,12}", normalized):
+        raise HTTPException(status_code=400, detail="PIN web deve ter entre 4 e 12 dígitos numéricos")
+    return normalized
+
+
+def _get_saas_session_secret() -> str:
+    return (
+        os.getenv("SAAS_SESSION_SECRET")
+        or os.getenv("WEBHOOK_TOKEN")
+        or os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+        or os.getenv("SUPABASE_KEY")
+        or "caixa-saas-dev-secret"
+    )
+
+
+def _encode_saas_session(telefone: str) -> str:
+    expires_at = int((datetime.now(timezone.utc) + timedelta(seconds=_SAAS_SESSION_TTL_SECONDS)).timestamp())
+    payload = f"{telefone}|{expires_at}"
+    payload_token = base64.urlsafe_b64encode(payload.encode("utf-8")).decode("ascii")
+    signature = hmac.new(
+        _get_saas_session_secret().encode("utf-8"),
+        payload_token.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"{payload_token}.{signature}"
+
+
+def _decode_saas_session(raw_cookie: Optional[str]) -> Optional[str]:
+    if not raw_cookie or "." not in raw_cookie:
+        return None
+    payload_token, signature = raw_cookie.rsplit(".", 1)
+    expected_signature = hmac.new(
+        _get_saas_session_secret().encode("utf-8"),
+        payload_token.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(signature, expected_signature):
+        return None
+    try:
+        payload = base64.urlsafe_b64decode(payload_token.encode("ascii")).decode("utf-8")
+        telefone, expires_at_raw = payload.split("|", 1)
+        if int(expires_at_raw) < int(datetime.now(timezone.utc).timestamp()):
+            return None
+        return telefone
+    except Exception:
+        return None
+
+
+def _set_saas_session(response: Response, telefone: str) -> None:
+    response.set_cookie(
+        key=_SAAS_SESSION_COOKIE,
+        value=_encode_saas_session(telefone),
+        httponly=True,
+        secure=_SAAS_COOKIE_SECURE,
+        samesite="lax",
+        max_age=_SAAS_SESSION_TTL_SECONDS,
+        path="/",
+    )
+
+
+def _clear_saas_session(response: Response) -> None:
+    response.delete_cookie(key=_SAAS_SESSION_COOKIE, path="/")
+
+
+def _get_saas_authenticated_user(request: Request, db: DatabaseClient) -> Optional[Dict[str, Any]]:
+    telefone = _decode_saas_session(request.cookies.get(_SAAS_SESSION_COOKIE))
+    if not telefone:
+        return None
+    usuario = db.get_usuario_web_auth(telefone)
+    if not usuario:
+        return None
+    enriched = dict(usuario)
+    enriched["web_pin_bootstrap_required"] = not bool(enriched.get("web_pin_hash"))
+    return enriched
+
+
+def _derive_forma_pagamento_summary(pagamentos: List[Dict[str, Any]]) -> str:
+    if not pagamentos:
+        return "dinheiro"
+    methods = {str(item.get("forma_pagamento") or "dinheiro") for item in pagamentos}
+    if len(methods) == 1:
+        method = next(iter(methods))
+        if method in {"dinheiro", "transferencia", "cheque"}:
+            return method
+    return "misto"
+
+
+def _build_web_payment_rows_html(values: Dict[str, str]) -> str:
+    rows: List[str] = []
+    for index in range(1, 5):
+        currency_key = f"payment_{index}_moeda"
+        amount_key = f"payment_{index}_valor"
+        fx_key = f"payment_{index}_cambio"
+        method_key = f"payment_{index}_forma"
+        moeda = values.get(currency_key, "USD" if index == 1 else "")
+        valor = values.get(amount_key, "")
+        cambio = values.get(fx_key, "1" if moeda == "USD" and index == 1 else "")
+        forma = values.get(method_key, "dinheiro")
+        rows.append(
+            f"""
+            <div class='payment-row'>
+                <label>Moeda #{index}
+                    <select name='{currency_key}'>
+                        <option value='' {'selected' if not moeda else ''}>-</option>
+                        <option value='USD' {'selected' if moeda=='USD' else ''}>USD</option>
+                        <option value='EUR' {'selected' if moeda=='EUR' else ''}>EUR</option>
+                        <option value='SRD' {'selected' if moeda=='SRD' else ''}>SRD</option>
+                        <option value='BRL' {'selected' if moeda=='BRL' else ''}>BRL</option>
+                    </select>
+                </label>
+                <label>Valor na moeda
+                    <input name='{amount_key}' value='{escape(valor)}' placeholder='ex.: 380' />
+                </label>
+                <label>Câmbio para USD
+                    <input name='{fx_key}' value='{escape(cambio)}' placeholder='vazio = último câmbio' />
+                </label>
+                <label>Forma
+                    <select name='{method_key}'>
+                        <option value='dinheiro' {'selected' if forma=='dinheiro' else ''}>Dinheiro</option>
+                        <option value='transferencia' {'selected' if forma=='transferencia' else ''}>Transferência</option>
+                        <option value='cheque' {'selected' if forma=='cheque' else ''}>Cheque</option>
+                    </select>
+                </label>
+            </div>
+            """
+        )
+    return "".join(rows)
+
+
+def _parse_decimal_web_field(raw: str, field_name: str) -> Decimal:
+    return parse_decimal(str(raw or "0").strip().replace(",", "."), field_name)
+
+
+def _parse_web_payments_from_form(db: DatabaseClient, form: Dict[str, str]) -> List[Dict[str, Any]]:
+    pagamentos: List[Dict[str, Any]] = []
+    for index in range(1, 5):
+        currency_key = f"payment_{index}_moeda"
+        amount_key = f"payment_{index}_valor"
+        fx_key = f"payment_{index}_cambio"
+        method_key = f"payment_{index}_forma"
+        moeda_raw = str(form.get(currency_key) or "").strip().upper()
+        valor_raw = str(form.get(amount_key) or "").strip()
+        cambio_raw = str(form.get(fx_key) or "").strip()
+        forma = _normalize_text(str(form.get(method_key) or "dinheiro"))
+
+        if not any([moeda_raw, valor_raw, cambio_raw]):
+            continue
+        if not moeda_raw or not valor_raw:
+            raise HTTPException(status_code=400, detail=f"Pagamento #{index} incompleto")
+        if moeda_raw not in {"USD", "EUR", "SRD", "BRL"}:
+            raise HTTPException(status_code=400, detail=f"Moeda inválida no pagamento #{index}")
+        if forma not in {"dinheiro", "transferencia", "cheque"}:
+            raise HTTPException(status_code=400, detail=f"Forma inválida no pagamento #{index}")
+
+        valor_moeda = _parse_decimal_web_field(valor_raw, amount_key)
+        if valor_moeda <= 0:
+            raise HTTPException(status_code=400, detail=f"Valor do pagamento #{index} deve ser maior que zero")
+
+        if moeda_raw == "USD":
+            cambio_para_usd = Decimal("1")
+        elif cambio_raw:
+            cambio_para_usd = _normalize_cambio_para_usd(moeda_raw, _parse_decimal_web_field(cambio_raw, fx_key))
+        else:
+            last_cambio = db.get_last_cambio_para_usd(moeda_raw)
+            if not last_cambio or Decimal(str(last_cambio)) <= 0:
+                raise HTTPException(status_code=400, detail=f"Sem câmbio disponível para {moeda_raw} no pagamento #{index}")
+            cambio_para_usd = fx_rate(Decimal(str(last_cambio)))
+
+        if cambio_para_usd <= 0:
+            raise HTTPException(status_code=400, detail=f"Câmbio inválido no pagamento #{index}")
+
+        pagamentos.append(
+            {
+                "moeda": moeda_raw,
+                "valor_moeda": str(money(valor_moeda)),
+                "cambio_para_usd": str(cambio_para_usd),
+                "valor_usd": str(money(valor_moeda / cambio_para_usd)),
+                "forma_pagamento": forma,
+            }
+        )
+
+    if pagamentos:
+        return pagamentos
+
+    total_pago_raw = str(form.get("total_pago_usd") or "").strip()
+    forma_pagamento = _normalize_text(str(form.get("forma_pagamento") or "dinheiro"))
+    if total_pago_raw:
+        total_pago = _parse_decimal_web_field(total_pago_raw, "total_pago_usd")
+        if total_pago <= 0:
+            raise HTTPException(status_code=400, detail="Total pago deve ser maior que zero")
+        return [
+            {
+                "moeda": "USD",
+                "valor_moeda": str(money(total_pago)),
+                "cambio_para_usd": "1",
+                "valor_usd": str(money(total_pago)),
+                "forma_pagamento": forma_pagamento if forma_pagamento in {"dinheiro", "transferencia", "cheque"} else "dinheiro",
+            }
+        ]
+
+    raise HTTPException(status_code=400, detail="Informe ao menos um pagamento")
+
+
+async def _request_form_dict(request: Request) -> Dict[str, str]:
+    raw_text = ""
+    try:
+        raw_text = (await request.body()).decode("utf-8", errors="ignore")
+    except Exception:
+        raw_text = ""
+
+    try:
+        form = await request.form()
+        return {str(k): str(v) for k, v in dict(form).items()}
+    except Exception:
+        pass
+
+    try:
+        parsed = parse_qs(raw_text)
+        return {k: v[0] for k, v in parsed.items() if v}
+    except Exception:
+        return {}
+
+
+def _dashboard_default_form_values(session_user: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
+    operador = str((session_user or {}).get("telefone") or "+59711111111")
+    return {
+        "operador_id": operador,
+        "tipo_operacao": "compra",
+        "origem": "balcao",
+        "teor": "90",
+        "peso": "",
+        "preco_usd": "",
+        "fechamento_gramas": "",
+        "fechamento_tipo": "total",
+        "pessoa": "",
+        "forma_pagamento": "dinheiro",
+        "total_pago_usd": "",
+        "observacoes": "",
+        "console_remetente": operador,
+        "console_mensagem": "menu",
+        "payment_1_moeda": "USD",
+        "payment_1_valor": "",
+        "payment_1_cambio": "1",
+        "payment_1_forma": "dinheiro",
+        "payment_2_moeda": "",
+        "payment_2_valor": "",
+        "payment_2_cambio": "",
+        "payment_2_forma": "dinheiro",
+        "payment_3_moeda": "",
+        "payment_3_valor": "",
+        "payment_3_cambio": "",
+        "payment_3_forma": "dinheiro",
+        "payment_4_moeda": "",
+        "payment_4_valor": "",
+        "payment_4_cambio": "",
+        "payment_4_forma": "dinheiro",
+    }
+
+
+def _render_saas_login_html(message: Optional[str] = None, telefone: str = "") -> str:
+    alert = ""
+    if message:
+        alert = f"<div class='alert error'>{escape(message)}</div>"
+    return f"""
+    <html>
+        <head>
+            <title>Caixa SaaS</title>
+            <meta name='viewport' content='width=device-width, initial-scale=1' />
+            <link rel='preconnect' href='https://fonts.googleapis.com'>
+            <link rel='preconnect' href='https://fonts.gstatic.com' crossorigin>
+            <link href='https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&display=swap' rel='stylesheet'>
+            <style>
+                :root {{ --bg: #f4efe6; --panel: #fffaf2; --ink: #1b1a17; --muted: #6f695d; --accent: #a36a00; --accent-2: #184f3f; --line: #e6d8bc; --error: #8f2d1d; }}
+                * {{ box-sizing: border-box; }}
+                body {{ margin: 0; min-height: 100vh; display: grid; place-items: center; font-family: 'Space Grotesk', 'Segoe UI', sans-serif; background: radial-gradient(circle at top, #f8f2e7 0%, #efe6d6 40%, #e5d9c4 100%); color: var(--ink); }}
+                .shell {{ width: min(520px, calc(100vw - 32px)); background: var(--panel); border: 1px solid var(--line); border-radius: 28px; padding: 28px; box-shadow: 0 24px 80px rgba(67, 46, 7, 0.12); }}
+                h1 {{ margin: 0 0 8px; font-size: 32px; }}
+                p {{ color: var(--muted); line-height: 1.5; }}
+                label {{ display: block; margin: 18px 0 8px; font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }}
+                input {{ width: 100%; padding: 14px 16px; border-radius: 14px; border: 1px solid var(--line); font: inherit; background: white; }}
+                button {{ width: 100%; margin-top: 18px; padding: 14px 18px; border: 0; border-radius: 14px; font: inherit; font-weight: 700; color: white; background: linear-gradient(135deg, var(--accent-2), var(--accent)); cursor: pointer; }}
+                .alert {{ margin: 16px 0; padding: 12px 14px; border-radius: 14px; }}
+                .error {{ background: #fde8e3; color: var(--error); border: 1px solid #efc3b8; }}
+            </style>
+        </head>
+        <body>
+            <div class='shell'>
+                <h1>Caixa SaaS</h1>
+                <p>Painel web para operar o mesmo motor do WhatsApp com leitura mais clara, relatórios e entrada rápida de dados.</p>
+                {alert}
+                <form method='post' action='/saas/login'>
+                    <label>Telefone do operador</label>
+                    <input name='telefone' value='{escape(telefone)}' placeholder='+59711111111' required />
+                    <label>PIN web</label>
+                    <input type='password' name='pin' inputmode='numeric' placeholder='Seu PIN numérico' required />
+                    <p class='hint'>Primeiro acesso após a migração: use os últimos 6 dígitos do telefone e troque o PIN logo após entrar.</p>
+                    <button type='submit'>Entrar no painel</button>
+                </form>
+            </div>
+        </body>
+    </html>
+    """
+
+
+def _render_saas_dashboard_html(
+    db: DatabaseClient,
+    session_user: Dict[str, Any],
+    notice: Optional[str] = None,
+    notice_kind: str = "info",
+    assistant_result: Optional[Dict[str, Any]] = None,
+    form_values: Optional[Dict[str, str]] = None,
+) -> str:
+    values = dict(_dashboard_default_form_values(session_user))
+    if form_values:
+        values.update({k: str(v) for k, v in form_values.items()})
+
+    day = _build_day_range(None)
+    week = _build_week_range()
+    summary = db.get_daily_gold_summary(day["start"], day["end"])
+    saldo = db.get_saldo_caixa()
+    inventory = db.get_gold_inventory_status()
+    if not inventory.get("lots"):
+        db.sync_gold_inventory_ledger()
+        inventory = db.get_gold_inventory_status()
+    recent_ops = db.get_extrato_transactions(week["start"], week["end"])[-12:]
+
+    balances_html = "".join(
+        f"<div class='balance'><span>{escape(moeda)}</span><strong>{escape(_format_caixa_movement(moeda, Decimal(str(saldo.get(moeda, '0')))))}</strong></div>"
+        for moeda in ["XAU", "USD", "EUR", "SRD", "BRL"]
+    )
+
+    lot_rows = cast(List[Dict[str, Any]], inventory.get("open_lots") or [])[:8]
+    lots_html = "".join(
+        f"<tr><td>GT-{escape(str(item.get('source_transaction_id', '')))}</td><td>{escape(str(item.get('remaining_grams', '0')))} g</td><td>USD {escape(str(item.get('unit_cost_usd', '0')))}</td></tr>"
+        for item in lot_rows
+    ) or "<tr><td colspan='3'>Sem lotes abertos.</td></tr>"
+
+    recent_rows = []
+    for item in reversed(recent_ops):
+        source = str(item.get("source") or "transacoes")
+        tid = str(item.get("id") or "-")
+        id_label = f"GT-{tid}" if source == "gold_transactions" else f"T-{tid}"
+        recent_rows.append(
+            f"<tr><td>{escape(id_label)}</td><td>{escape(str(item.get('tipo_operacao') or '-').upper())}</td><td>{escape(str(item.get('pessoa') or '-'))}</td><td>{escape(str(item.get('peso') or '0'))} g</td><td>USD {escape(str(item.get('total_usd') or '0'))}</td></tr>"
+        )
+    recent_html = "".join(recent_rows) or "<tr><td colspan='5'>Nenhuma operação recente.</td></tr>"
+
+    notice_html = ""
+    if notice:
+        notice_html = f"<div class='notice {escape(notice_kind)}'>{escape(notice)}</div>"
+
+    assistant_html = ""
+    if assistant_result:
+        assistant_message = escape(str(assistant_result.get("mensagem") or ""))
+        assistant_data = escape(json.dumps(assistant_result.get("dados") or {}, ensure_ascii=False, indent=2))
+        assistant_html = f"<div class='console-output'><h3>Resposta do operador virtual</h3><pre>{assistant_message}</pre><details><summary>Dados técnicos</summary><pre>{assistant_data}</pre></details></div>"
+
+    user_name = escape(str(session_user.get("nome") or session_user.get("telefone") or "Operador"))
+    user_phone = escape(str(session_user.get("telefone") or "-"))
+    user_role = escape(str(session_user.get("tipo_usuario") or "operador"))
+    bootstrap_notice = ""
+    if session_user.get("web_pin_bootstrap_required"):
+        bootstrap_notice = "<div class='notice error'>PIN temporário em uso. Troque o PIN agora para remover o bootstrap de login.</div>"
+    payment_rows_html = _build_web_payment_rows_html(values)
+    return f"""
+    <html>
+        <head>
+            <title>Caixa SaaS Dashboard</title>
+            <meta name='viewport' content='width=device-width, initial-scale=1' />
+            <link rel='preconnect' href='https://fonts.googleapis.com'>
+            <link rel='preconnect' href='https://fonts.gstatic.com' crossorigin>
+            <link href='https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap' rel='stylesheet'>
+            <style>
+                :root {{ --bg: #f6f0e4; --panel: rgba(255,252,245,.88); --ink: #1b1a17; --muted: #6f695d; --line: #e7dbc5; --gold: #ad7400; --green: #1d5844; --green-2: #2f7760; --danger: #8f2d1d; --danger-bg: #fde9e5; --info-bg: #e7f5ef; }}
+                * {{ box-sizing: border-box; }}
+                body {{ margin: 0; font-family: 'Space Grotesk', 'Segoe UI', sans-serif; color: var(--ink); background: radial-gradient(circle at top left, #fff8ea 0%, #f6ecda 35%, #ecdfc7 100%); }}
+                .wrap {{ width: min(1380px, calc(100vw - 28px)); margin: 20px auto 48px; }}
+                .hero {{ display: grid; grid-template-columns: 1.3fr .7fr; gap: 18px; margin-bottom: 18px; }}
+                .panel {{ background: var(--panel); backdrop-filter: blur(18px); border: 1px solid var(--line); border-radius: 28px; box-shadow: 0 24px 80px rgba(64, 44, 7, 0.08); }}
+                .hero-main {{ padding: 28px; background: linear-gradient(135deg, rgba(29,88,68,.95), rgba(173,116,0,.92)); color: white; }}
+                .hero-main h1 {{ margin: 0 0 8px; font-size: 38px; line-height: 1; }}
+                .hero-main p {{ margin: 0; max-width: 720px; color: rgba(255,255,255,.82); line-height: 1.5; }}
+                .hero-side {{ padding: 22px; display: grid; gap: 12px; align-content: start; }}
+                .hero-side a {{ color: var(--green); text-decoration: none; font-weight: 700; }}
+                .grid {{ display: grid; grid-template-columns: 1.1fr .9fr; gap: 18px; }}
+                .stack {{ display: grid; gap: 18px; }}
+                .section {{ padding: 22px; }}
+                .section h2 {{ margin: 0 0 14px; font-size: 22px; }}
+                .cards {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }}
+                .card {{ padding: 18px; border-radius: 20px; background: rgba(255,255,255,.7); border: 1px solid var(--line); }}
+                .card small {{ display: block; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; margin-bottom: 10px; }}
+                .card strong {{ font-size: 28px; }}
+                .balance-grid {{ display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; }}
+                .balance {{ padding: 16px; border-radius: 18px; background: rgba(255,255,255,.72); border: 1px solid var(--line); display: grid; gap: 6px; }}
+                .balance span {{ color: var(--muted); font-size: 13px; text-transform: uppercase; letter-spacing: .08em; }}
+                .balance strong {{ font-size: 20px; }}
+                .notice {{ margin-bottom: 18px; padding: 14px 16px; border-radius: 18px; font-weight: 500; }}
+                .notice.info {{ background: var(--info-bg); color: var(--green); border: 1px solid #bfe3d4; }}
+                .notice.error {{ background: var(--danger-bg); color: var(--danger); border: 1px solid #eab7ad; }}
+                form {{ display: grid; gap: 14px; }}
+                .fields-2 {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }}
+                .fields-3 {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }}
+                label {{ display: grid; gap: 7px; color: var(--muted); font-size: 13px; text-transform: uppercase; letter-spacing: .08em; }}
+                input, select, textarea {{ width: 100%; border-radius: 14px; border: 1px solid var(--line); padding: 13px 14px; font: inherit; color: var(--ink); background: rgba(255,255,255,.95); }}
+                textarea {{ min-height: 116px; resize: vertical; }}
+                button {{ border: 0; border-radius: 16px; padding: 14px 18px; font: inherit; font-weight: 700; cursor: pointer; color: white; background: linear-gradient(135deg, var(--green), var(--gold)); }}
+                table {{ width: 100%; border-collapse: collapse; font-size: 14px; }}
+                th, td {{ text-align: left; padding: 12px 10px; border-bottom: 1px solid var(--line); }}
+                th {{ color: var(--muted); text-transform: uppercase; font-size: 12px; letter-spacing: .08em; }}
+                pre {{ white-space: pre-wrap; word-break: break-word; font-family: 'IBM Plex Mono', monospace; background: #181814; color: #f7f4ea; padding: 16px; border-radius: 16px; overflow: auto; }}
+                .console-output details summary {{ cursor: pointer; color: var(--muted); margin-bottom: 10px; }}
+                .hint {{ color: var(--muted); font-size: 14px; line-height: 1.5; }}
+                .user-chip {{ display: inline-flex; gap: 8px; align-items: center; padding: 8px 12px; border-radius: 999px; background: rgba(255,255,255,.14); font-size: 13px; margin-top: 14px; }}
+                .actions-inline {{ display: flex; gap: 10px; flex-wrap: wrap; }}
+                .actions-inline form {{ display: inline-block; }}
+                .ghost-btn {{ background: white; color: var(--green); border: 1px solid var(--line); }}
+                .payment-stack {{ display: grid; gap: 10px; }}
+                .payment-row {{ display: grid; grid-template-columns: 0.9fr 1.1fr 1fr 1fr; gap: 10px; }}
+                @media (max-width: 1100px) {{ .hero, .grid {{ grid-template-columns: 1fr; }} .balance-grid, .cards, .fields-3 {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }} }}
+                @media (max-width: 720px) {{ .wrap {{ width: calc(100vw - 18px); }} .balance-grid, .cards, .fields-2, .fields-3, .payment-row {{ grid-template-columns: 1fr; }} .hero-main h1 {{ font-size: 30px; }} }}
+            </style>
+        </head>
+        <body>
+            <div class='wrap'>
+                <div class='hero'>
+                    <section class='panel hero-main'>
+                        <h1>Caixa SaaS</h1>
+                        <p>Operação híbrida para o mesmo backend: relatórios, estoque FIFO, caixa dos 5 saldos, operação rápida multi-moeda e console web usando o mesmo motor conversacional do WhatsApp.</p>
+                        <div class='user-chip'>{user_name} · {user_role} · {user_phone}</div>
+                    </section>
+                    <aside class='panel hero-side'>
+                        <div><strong>Data</strong><br>{escape(day['date'])}</div>
+                        <div><strong>Estoque</strong><br>{escape(str(inventory.get('available_grams', '0')))} g</div>
+                        <div><strong>Links</strong><br><a href='/reports/inventory-status' target='_blank'>JSON estoque</a></div>
+                        <div class='actions-inline'>
+                            <form method='post' action='/saas/logout'><button class='ghost-btn' type='submit'>Sair</button></form>
+                        </div>
+                    </aside>
+                </div>
+                {bootstrap_notice}
+                {notice_html}
+                <section class='panel section'>
+                    <h2>Leitura Rápida</h2>
+                    <div class='cards'>
+                        <div class='card'><small>Operações Hoje</small><strong>{escape(str(summary.get('total_operacoes', 0)))}</strong></div>
+                        <div class='card'><small>Total USD Hoje</small><strong>USD {escape(str(summary.get('total_usd', '0')))}</strong></div>
+                        <div class='card'><small>Custo Médio Aberto</small><strong>USD {escape(str(inventory.get('avg_cost_usd_per_gram', '0.00')))}</strong></div>
+                    </div>
+                </section>
+                <section class='panel section'>
+                    <h2>5 Caixas</h2>
+                    <div class='balance-grid'>{balances_html}</div>
+                </section>
+                <div class='grid'>
+                    <div class='stack'>
+                        <section class='panel section'>
+                            <h2>Operação Rápida Web</h2>
+                            <p class='hint'>Entrada direta para compra ou venda com até 4 pagamentos por moeda. Se o câmbio ficar vazio, o sistema tenta usar o último valor conhecido.</p>
+                            <form method='post' action='/saas/operations/quick'>
+                                <div class='fields-3'>
+                                    <label>Operador
+                                        <input name='operador_id' value='{escape(values['operador_id'])}' required />
+                                    </label>
+                                    <label>Tipo
+                                        <select name='tipo_operacao'>
+                                            <option value='compra' {'selected' if values['tipo_operacao']=='compra' else ''}>Compra</option>
+                                            <option value='venda' {'selected' if values['tipo_operacao']=='venda' else ''}>Venda</option>
+                                        </select>
+                                    </label>
+                                    <label>Origem
+                                        <select name='origem'>
+                                            <option value='balcao' {'selected' if values['origem']=='balcao' else ''}>Balcão</option>
+                                            <option value='fora' {'selected' if values['origem']=='fora' else ''}>Fora</option>
+                                        </select>
+                                    </label>
+                                </div>
+                                <div class='fields-3'>
+                                    <label>Teor %
+                                        <input name='teor' value='{escape(values['teor'])}' required />
+                                    </label>
+                                    <label>Peso g
+                                        <input name='peso' value='{escape(values['peso'])}' required />
+                                    </label>
+                                    <label>Preço USD/g
+                                        <input name='preco_usd' value='{escape(values['preco_usd'])}' required />
+                                    </label>
+                                </div>
+                                <div class='fields-2'>
+                                    <label>Fechamento g
+                                        <input name='fechamento_gramas' value='{escape(values['fechamento_gramas'])}' placeholder='vazio = total' />
+                                    </label>
+                                    <label>Fechamento Tipo
+                                        <select name='fechamento_tipo'>
+                                            <option value='total' {'selected' if values['fechamento_tipo']=='total' else ''}>Total</option>
+                                            <option value='parcial' {'selected' if values['fechamento_tipo']=='parcial' else ''}>Parcial</option>
+                                        </select>
+                                    </label>
+                                </div>
+                                <div class='fields-2'>
+                                    <label>Pessoa
+                                        <input name='pessoa' value='{escape(values['pessoa'])}' required />
+                                    </label>
+                                    <label>Total Pago USD legado
+                                        <input name='total_pago_usd' value='{escape(values['total_pago_usd'])}' placeholder='use só se não preencher linhas de pagamento' />
+                                    </label>
+                                </div>
+                                <div class='payment-stack'>
+                                    {payment_rows_html}
+                                </div>
+                                <label>Observações
+                                    <textarea name='observacoes' placeholder='Detalhes adicionais'>{escape(values['observacoes'])}</textarea>
+                                </label>
+                                <label><input type='checkbox' name='risk_override' value='1' style='width:auto;margin-right:8px;' /> Autorizar risco se o operador informado for admin</label>
+                                <button type='submit'>Salvar operação web</button>
+                            </form>
+                        </section>
+                        <section class='panel section'>
+                            <h2>Operações Recentes</h2>
+                            <table>
+                                <thead><tr><th>ID</th><th>Tipo</th><th>Pessoa</th><th>Peso</th><th>Total</th></tr></thead>
+                                <tbody>{recent_html}</tbody>
+                            </table>
+                        </section>
+                    </div>
+                    <div class='stack'>
+                        <section class='panel section'>
+                            <h2>Console do Operador</h2>
+                            <p class='hint'>Aqui você usa exatamente o mesmo motor do WhatsApp, mas dentro do navegador. Bom para onboarding, testes e operação híbrida.</p>
+                            <form method='post' action='/saas/console'>
+                                <label>Remetente / operador
+                                    <input name='console_remetente' value='{escape(values['console_remetente'])}' required />
+                                </label>
+                                <label>Mensagem
+                                    <textarea name='console_mensagem' required>{escape(values['console_mensagem'])}</textarea>
+                                </label>
+                                <button type='submit'>Executar no motor do WhatsApp</button>
+                            </form>
+                            {assistant_html}
+                        </section>
+                        <section class='panel section'>
+                            <h2>Segurança do Acesso</h2>
+                            <p class='hint'>O painel agora usa sessão HTTP com operador autenticado. Troque o PIN sempre que fizer bootstrap ou rotação de credencial.</p>
+                            <form method='post' action='/saas/profile/pin'>
+                                <div class='fields-3'>
+                                    <label>PIN atual
+                                        <input type='password' name='current_pin' inputmode='numeric' required />
+                                    </label>
+                                    <label>Novo PIN
+                                        <input type='password' name='new_pin' inputmode='numeric' required />
+                                    </label>
+                                    <label>Confirmar novo PIN
+                                        <input type='password' name='confirm_pin' inputmode='numeric' required />
+                                    </label>
+                                </div>
+                                <button type='submit'>Trocar PIN web</button>
+                            </form>
+                        </section>
+                        <section class='panel section'>
+                            <h2>Estoque FIFO Aberto</h2>
+                            <div class='cards'>
+                                <div class='card'><small>Disponível</small><strong>{escape(str(inventory.get('available_grams', '0')))} g</strong></div>
+                                <div class='card'><small>Custo Aberto</small><strong>USD {escape(str(inventory.get('inventory_cost_usd', '0.00')))}</strong></div>
+                                <div class='card'><small>Lotes</small><strong>{escape(str(len(lot_rows)))}</strong></div>
+                            </div>
+                            <table>
+                                <thead><tr><th>Lote</th><th>Saldo</th><th>Custo</th></tr></thead>
+                                <tbody>{lots_html}</tbody>
+                            </table>
+                        </section>
+                    </div>
+                </div>
+            </div>
+        </body>
+    </html>
+    """
+
+
 def _is_help_menu_request(message: str) -> bool:
     text = _normalize_text(message)
     keywords = [
@@ -1234,6 +1994,15 @@ def _parse_operation_id(raw: str) -> Optional[int]:
     return None
 
 
+def _parse_operation_reference(raw: str) -> Tuple[str, Optional[int]]:
+    text = raw.strip().lower()
+    if text.startswith("gt-"):
+        return "gold", _parse_operation_id(text)
+    if text.startswith("t-") or text.startswith("op-"):
+        return "transacao", _parse_operation_id(text)
+    return "transacao", _parse_operation_id(text)
+
+
 def _normalize_edit_field(raw: str) -> Optional[str]:
     field = _normalize_text(raw)
     aliases = {
@@ -1290,9 +2059,15 @@ def _try_handle_whatsapp_commands(
         field_token = edit_match.group(3)
         value_token = edit_match.group(4)
 
-        op_id = _parse_operation_id(op_token)
+        op_kind, op_id = _parse_operation_reference(op_token)
         if op_id is None:
             return {"mensagem": "ID inválido. Exemplo: editar 123 preco 110", "dados": {"acao": "editar_operacao"}}
+
+        if op_kind == "gold":
+            return {
+                "mensagem": "Operações guiadas GT não suportam edição direta. Use cancelar GT-<id> e refaça a operação.",
+                "dados": {"acao": "editar_operacao", "id": op_id, "kind": "gold", "permitido": False},
+            }
 
         transacao_resp = (
             db.client.table("transacoes")
@@ -1380,9 +2155,37 @@ def _try_handle_whatsapp_commands(
     # cancelar 123
     cancel_match = re.match(r"^\s*(cancelar|cancela|excluir|delete)\s+(.+?)\s*$", text, re.IGNORECASE)
     if cancel_match:
-        op_id = _parse_operation_id(cancel_match.group(2))
+        op_kind, op_id = _parse_operation_reference(cancel_match.group(2))
         if op_id is None:
             return {"mensagem": "ID inválido. Exemplo: cancelar 123", "dados": {"acao": "cancelar_operacao"}}
+
+        if op_kind == "gold":
+            transacao_resp = (
+                db.client.table("gold_transactions")
+                .select("*")
+                .eq("id", op_id)
+                .limit(1)
+                .execute()
+            )
+            rows = cast(List[Dict[str, Any]], transacao_resp.data or [])
+            if not rows:
+                return {"mensagem": f"Operação GT-{op_id} não encontrada.", "dados": {"acao": "cancelar_operacao", "kind": "gold"}}
+
+            row = rows[0]
+            is_admin = str(usuario.get("tipo_usuario", "")).lower() == "admin"
+            if not is_admin and str(row.get("operador_id", "")) != remetente:
+                return {
+                    "mensagem": "Você não tem permissão para cancelar esta operação guiada.",
+                    "dados": {"acao": "cancelar_operacao", "permitido": False, "kind": "gold"},
+                }
+
+            ok = db.cancel_gold_transaction(op_id, cancelled_by=remetente)
+            if not ok:
+                return {"mensagem": "Não consegui cancelar a operação guiada agora.", "dados": {"acao": "cancelar_operacao", "id": op_id, "kind": "gold"}}
+            return {
+                "mensagem": f"✅ Operação GT-{op_id} cancelada com sucesso.",
+                "dados": {"acao": "cancelar_operacao", "id": op_id, "status": "cancelada", "kind": "gold"},
+            }
 
         transacao_resp = (
             db.client.table("transacoes")
@@ -2746,13 +3549,6 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
             _clear_session(db, remetente)
             return {"mensagem": "Operação cancelada com sucesso.", "dados": {"intencao": "fluxo_guiado_cancelado"}}
 
-        ativo = db.get_ativo_by_nome("Ouro")
-        if not ativo:
-            ativo = db.get_ativo_by_nome("Ouro 24k")
-        if not ativo:
-            raise HTTPException(status_code=404, detail="Ativo não encontrado")
-
-        ativo_id = int(ativo["id"])
         peso = Decimal(str(contexto.get("peso")))
         preco = Decimal(str(contexto.get("preco_usd")))
         total = money(peso * preco)
@@ -2788,145 +3584,7 @@ def _process_guided_flow(remetente: str, mensagem: str, db: DatabaseClient, sess
                 "mensagem": "⛔ Bloqueio de risco.\n" + "\n".join(risk_lines) + "\nSomente admin pode autorizar override. Use voltar ou cancelar.",
                 "dados": {"etapa": estado, "risk_blocked": True},
             }
-
-        header_payload: Dict[str, Any] = {
-            "tipo_operacao": tipo_operacao_confirm,
-            "origem": str(contexto.get("origem", "balcao")),
-            "gold_type": "fundido",
-            "quebra": None,
-            "teor": contexto.get("teor"),
-            "peso": str(peso),
-            "preco_usd": str(money(preco)),
-            "total_usd": str(total),
-            "total_pago_usd": str(money(total_pago)),
-            "diferenca_usd": str(diferenca),
-            "fechamento_gramas": contexto.get("fechamento_gramas"),
-            "fechamento_tipo": str(contexto.get("fechamento_tipo", "parcial")),
-            "pessoa": str(contexto.get("pessoa", "")),
-            "forma_pagamento": str(contexto.get("forma_pagamento", "dinheiro")),
-            "observacoes": contexto.get("observacoes", ""),
-            "operador_id": remetente,
-            "source_message_id": contexto.get("source_message_id"),
-            "contexto": contexto,
-            "criado_em": datetime.now(timezone.utc).isoformat(),
-        }
-
-        gold_transaction = db.insert_gold_transaction(
-            payload=header_payload,
-            pagamentos=pagamentos,
-        )
-
-        transacao = db.insert_transacao(
-            tipo_operacao=str(contexto.get("tipo_operacao", "compra")),
-            ativo_id=ativo_id,
-            quantidade=peso,
-            cotacao_usada=preco,
-            valor_total=total,
-            operador_id=remetente,
-            source_message_id=contexto.get("source_message_id"),
-            status="registrada",
-        )
-
-        db.insert_log(
-            nivel="info",
-            remetente=remetente,
-            mensagem_recebida="CONFIRMACAO_FLUXO_GUIADO",
-            resposta_enviada="Fluxo guiado confirmado",
-            contexto=contexto,
-        )
-        if risco_diferenca:
-            db.insert_log(
-                nivel="warning",
-                remetente=remetente,
-                mensagem_recebida="ALERTA_RISCO_DIFERENCA",
-                contexto={
-                    "intencao": "alerta_risco",
-                    "tipo": "diferenca_alta",
-                    "limite_usd": str(_RISK_DIFF_LIMIT_USD),
-                    "diferenca_usd": str(diferenca),
-                    "tipo_operacao": contexto.get("tipo_operacao"),
-                },
-                erro="Diferença de caixa acima do limite",
-            )
-
-        review_payload: Optional[Dict[str, Any]] = None
-        review_transaction: Dict[str, Any] = {
-            "tipo_operacao": str(contexto.get("tipo_operacao", "compra")),
-            "origem": str(contexto.get("origem", "balcao")),
-            "teor": contexto.get("teor"),
-            "peso": str(peso),
-            "preco_usd": str(money(preco)),
-            "total_usd": str(total),
-            "total_pago_usd": str(money(total_pago)),
-            "diferenca_usd": str(diferenca),
-            "fechamento_gramas": contexto.get("fechamento_gramas"),
-            "forma_pagamento": str(contexto.get("forma_pagamento", "dinheiro")),
-            "pagamentos": pagamentos,
-            "transacao_id": transacao.get("id"),
-        }
-        if _should_trigger_multi_agent_review(review_transaction, force=risco_diferenca):
-            review_payload = _run_automatic_multi_agent_review(
-                db,
-                objective="avaliacao automatica de operacao enterprise",
-                transaction=review_transaction,
-                operation_id=gold_transaction.get("id") if isinstance(gold_transaction, dict) else None,
-                operation_kind="gold_transaction",
-                source_message_id=contexto.get("source_message_id"),
-            )
-
-        _save_session(db, remetente, "await_caixa_detalhe", {"source": "post_operacao"})
-        alerta = "" if not risco_diferenca else " ⚠️ Atenção: verificar diferença."
-
-        gt_id = gold_transaction.get("id") if isinstance(gold_transaction, dict) else None
-        tx_id = transacao.get("id")
-        if gt_id:
-            id_linha = f"ID: GT-{gt_id}\n"
-        elif tx_id:
-            id_linha = f"ID: T-{tx_id}\n"
-        else:
-            id_linha = ""
-
-        caixa_resp = _build_caixa_response(db)
-        caixa_msg = str(caixa_resp.get("mensagem", ""))
-
-        tipo_operacao = str(contexto.get("tipo_operacao", "compra"))
-        direcao_txt = "Saiu" if tipo_operacao == "compra" else "Entrou"
-        direcao_ouro_txt = "Entrou" if tipo_operacao == "compra" else "Saiu"
-        peso = Decimal(str(contexto.get("peso", "0")))
-        mov_linhas: List[str] = []
-        
-        # Show ouro movement
-        mov_linhas.append(f"- {direcao_ouro_txt} ouro: {peso:,.3f}g")
-        
-        # Show cada moeda movement (no USD reference)
-        for pagamento in pagamentos:
-            moeda_pg = str(pagamento.get("moeda", "USD")).upper()
-            valor_moeda_pg = Decimal(str(pagamento.get("valor_moeda", "0")))
-            mov_linhas.append(f"- {direcao_txt} {moeda_pg}: {money(valor_moeda_pg)}")
-        
-        mov_txt = "\n".join(mov_linhas) if mov_linhas else "- Sem movimentação registrada"
-
-        response_payload: Dict[str, Any] = {
-            "mensagem": (
-                f"✅ Operação salva com sucesso.\n"
-                f"{id_linha}"
-                f"Tipo: {tipo_operacao}\n"
-                f"Peso: {peso:,.3f}g\n"
-                "Movimentação dos 5 caixas:\n"
-                f"{mov_txt}{alerta}\n"
-                "════════════════════════════════\n"
-                f"{caixa_msg}"
-            ),
-            "dados": {
-                "intencao": "fluxo_guiado_confirmado",
-                "tipo_operacao": contexto.get("tipo_operacao"),
-                "peso": str(peso),
-                "pagamentos": pagamentos,
-            },
-        }
-        if review_payload:
-            response_payload["dados"]["analise_multiagente"] = review_payload
-        return response_payload
+        return _persist_gold_operation_from_context(db, remetente, contexto, post_save_session=True)
 
     if estado == "await_preco_simples":
         cotacao = _parse_decimal_from_text(mensagem, "preco_usd")
@@ -3537,6 +4195,205 @@ def admin_dashboard(x_webhook_token: Optional[str] = Header(default=None)) -> Re
     </html>
     """
     return Response(content=html, media_type="text/html")
+
+
+@app.get("/saas")
+@app.get("/saas/dashboard")
+def saas_dashboard(request: Request) -> Response:
+    db = get_db()
+    session_user = _get_saas_authenticated_user(request, db)
+    if not session_user:
+        return Response(content=_render_saas_login_html(), media_type="text/html")
+    return Response(content=_render_saas_dashboard_html(db, session_user), media_type="text/html")
+
+
+@app.post("/saas/login")
+async def saas_login(request: Request) -> Response:
+    form = await _request_form_dict(request)
+    telefone = _normalize_user_phone(str(form.get("telefone") or ""))
+    pin = str(form.get("pin") or "")
+    if not telefone or not pin:
+        return Response(content=_render_saas_login_html("Informe telefone e PIN.", telefone=telefone), media_type="text/html", status_code=400)
+
+    db = get_db()
+    usuario = db.verify_usuario_web_pin(telefone, pin)
+    if not usuario:
+        return Response(content=_render_saas_login_html("Credenciais inválidas.", telefone=telefone), media_type="text/html", status_code=401)
+
+    response = Response(content=_render_saas_dashboard_html(db, usuario), media_type="text/html")
+    _set_saas_session(response, telefone)
+    return response
+
+
+@app.post("/saas/logout")
+def saas_logout() -> Response:
+    response = Response(content=_render_saas_login_html("Sessão encerrada."), media_type="text/html")
+    _clear_saas_session(response)
+    return response
+
+
+@app.post("/saas/profile/pin")
+async def saas_profile_pin(request: Request) -> Response:
+    db = get_db()
+    session_user = _get_saas_authenticated_user(request, db)
+    if not session_user:
+        response = Response(content=_render_saas_login_html("Faça login para continuar."), media_type="text/html", status_code=401)
+        _clear_saas_session(response)
+        return response
+
+    form = await _request_form_dict(request)
+    current_pin = str(form.get("current_pin") or "")
+    new_pin = str(form.get("new_pin") or "")
+    confirm_pin = str(form.get("confirm_pin") or "")
+    try:
+        _validate_web_pin_format(current_pin)
+        validated_new_pin = _validate_web_pin_format(new_pin)
+    except HTTPException as exc:
+        html = _render_saas_dashboard_html(db, session_user, notice=str(exc.detail), notice_kind="error")
+        return Response(content=html, media_type="text/html", status_code=exc.status_code)
+
+    if validated_new_pin != confirm_pin:
+        html = _render_saas_dashboard_html(db, session_user, notice="Confirmação do novo PIN não confere.", notice_kind="error")
+        return Response(content=html, media_type="text/html", status_code=400)
+    if not db.verify_usuario_web_pin(str(session_user.get("telefone") or ""), current_pin):
+        html = _render_saas_dashboard_html(db, session_user, notice="PIN atual inválido.", notice_kind="error")
+        return Response(content=html, media_type="text/html", status_code=401)
+    if not db.set_usuario_web_pin(str(session_user.get("telefone") or ""), validated_new_pin):
+        html = _render_saas_dashboard_html(db, session_user, notice="Não foi possível atualizar o PIN.", notice_kind="error")
+        return Response(content=html, media_type="text/html", status_code=500)
+
+    refreshed_user = db.get_usuario_web_auth(str(session_user.get("telefone") or "")) or session_user
+    response = Response(content=_render_saas_dashboard_html(db, refreshed_user, notice="PIN web atualizado com sucesso."), media_type="text/html")
+    _set_saas_session(response, str(session_user.get("telefone") or ""))
+    return response
+
+
+@app.post("/saas/console")
+async def saas_console(request: Request) -> Response:
+    form = await _request_form_dict(request)
+    db = get_db()
+    session_user = _get_saas_authenticated_user(request, db)
+    if not session_user:
+        response = Response(content=_render_saas_login_html("Faça login para continuar."), media_type="text/html", status_code=401)
+        _clear_saas_session(response)
+        return response
+    remetente = str(form.get("console_remetente") or "").strip()
+    mensagem = str(form.get("console_mensagem") or "").strip()
+    values = {k: str(v) for k, v in form.items()}
+    if not remetente or not mensagem:
+        html = _render_saas_dashboard_html(db, session_user, notice="Preencha remetente e mensagem no console.", notice_kind="error", form_values=values)
+        return Response(content=html, media_type="text/html", status_code=400)
+
+    if str(session_user.get("tipo_usuario") or "").lower() != "admin":
+        remetente = str(session_user.get("telefone") or remetente)
+        values["console_remetente"] = remetente
+
+    try:
+        result = _processar_webhook(WhatsAppWebhookPayload(remetente=remetente, mensagem=mensagem), db, None)
+        html = _render_saas_dashboard_html(db, session_user, notice="Mensagem processada pelo motor do WhatsApp.", notice_kind="info", assistant_result=result, form_values=values)
+        return Response(content=html, media_type="text/html")
+    except HTTPException as exc:
+        html = _render_saas_dashboard_html(db, session_user, notice=_ERROS_AMIGAVEIS.get(exc.status_code, str(exc.detail)), notice_kind="error", form_values=values)
+        return Response(content=html, media_type="text/html", status_code=exc.status_code)
+
+
+@app.post("/saas/operations/quick")
+async def saas_quick_operation(request: Request) -> Response:
+    form = await _request_form_dict(request)
+    db = get_db()
+    session_user = _get_saas_authenticated_user(request, db)
+    if not session_user:
+        response = Response(content=_render_saas_login_html("Faça login para continuar."), media_type="text/html", status_code=401)
+        _clear_saas_session(response)
+        return response
+    values = {k: str(v) for k, v in form.items()}
+    try:
+        operador_id = _normalize_user_phone(str(form.get("operador_id") or session_user.get("telefone") or ""))
+        tipo_operacao = _normalize_text(str(form.get("tipo_operacao") or "compra"))
+        origem = _normalize_text(str(form.get("origem") or "balcao"))
+        teor = _parse_decimal_web_field(str(form.get("teor") or "0"), "teor")
+        peso = _parse_decimal_web_field(str(form.get("peso") or "0"), "peso")
+        preco_usd = _parse_decimal_web_field(str(form.get("preco_usd") or "0"), "preco_usd")
+        pessoa = str(form.get("pessoa") or "").strip()
+        observacoes = str(form.get("observacoes") or "").strip()
+        if tipo_operacao not in {"compra", "venda"}:
+            raise HTTPException(status_code=400, detail="Tipo de operação inválido")
+        if origem not in {"balcao", "fora"}:
+            raise HTTPException(status_code=400, detail="Origem inválida")
+        if teor < 0 or teor > Decimal("99.99"):
+            raise HTTPException(status_code=400, detail="Teor inválido")
+        if peso <= 0 or preco_usd <= 0:
+            raise HTTPException(status_code=400, detail="Peso e preço devem ser maiores que zero")
+        if not pessoa:
+            raise HTTPException(status_code=400, detail="Pessoa é obrigatória")
+
+        session_phone = str(session_user.get("telefone") or "")
+        is_admin = str(session_user.get("tipo_usuario", "")).lower() == "admin"
+        if not operador_id:
+            operador_id = session_phone
+        if not is_admin and operador_id != session_phone:
+            raise HTTPException(status_code=403, detail="Operador web só pode lançar em seu próprio usuário")
+
+        usuario = db.get_usuario_by_telefone(operador_id)
+        if not usuario:
+            raise HTTPException(status_code=403, detail="Operador não autorizado")
+
+        total_usd = money(peso * preco_usd)
+        pagamentos = _parse_web_payments_from_form(db, values)
+        total_pago_usd = sum((Decimal(str(item.get("valor_usd") or "0")) for item in pagamentos), Decimal("0"))
+        forma_pagamento = _derive_forma_pagamento_summary(pagamentos)
+
+        fechamento_raw = str(form.get("fechamento_gramas") or "").strip()
+        fechamento_gramas = peso if not fechamento_raw else _parse_decimal_web_field(fechamento_raw, "fechamento_gramas")
+        fechamento_tipo = _normalize_text(str(form.get("fechamento_tipo") or "total"))
+        if fechamento_tipo not in {"total", "parcial"}:
+            raise HTTPException(status_code=400, detail="Fechamento inválido")
+        if fechamento_gramas < 0 or fechamento_gramas > peso:
+            raise HTTPException(status_code=400, detail="Fechamento em gramas inválido")
+
+        contexto: Dict[str, Any] = {
+            "tipo_operacao": tipo_operacao,
+            "origem": origem,
+            "teor": str(money(teor)),
+            "peso": str(peso),
+            "preco_moeda": "USD",
+            "preco_usd": str(money(preco_usd)),
+            "total_usd": str(total_usd),
+            "total_pago_usd": str(money(total_pago_usd)),
+            "fechamento_gramas": str(money(fechamento_gramas)),
+            "fechamento_tipo": fechamento_tipo,
+            "pessoa": pessoa,
+            "forma_pagamento": forma_pagamento,
+            "observacoes": observacoes,
+            "source_message_id": None,
+            "pagamentos": pagamentos,
+        }
+        if tipo_operacao == "venda":
+            _attach_sale_profit_reference(db, contexto)
+
+        projected = _project_caixa_balances(db.get_saldo_caixa(), tipo_operacao, peso, cast(List[Dict[str, Any]], contexto["pagamentos"]))
+        negative_balances = _find_negative_caixa_balances(projected)
+        fifo_shortfall = Decimal(str(contexto.get("fifo_shortfall_grams", "0")))
+        risk_lines: List[str] = []
+        if negative_balances:
+            risk_lines.append("Saldos projetados negativos:")
+            risk_lines.extend(_format_negative_caixa_lines(negative_balances))
+        if fifo_shortfall > 0:
+            risk_lines.append(f"- Estoque FIFO insuficiente: faltam {fifo_shortfall} g")
+
+        wants_override = str(form.get("risk_override") or "") == "1"
+        if risk_lines and not (is_admin and wants_override):
+            html = _render_saas_dashboard_html(db, session_user, notice="⛔ " + " | ".join(risk_lines), notice_kind="error", form_values=values)
+            return Response(content=html, media_type="text/html", status_code=400)
+
+        result = _persist_gold_operation_from_context(db, operador_id, contexto, post_save_session=False)
+        gt_id = result.get("dados", {}).get("gold_transaction_id")
+        ok_msg = f"Operação web salva com sucesso. GT-{gt_id}" if gt_id else "Operação web salva com sucesso."
+        html = _render_saas_dashboard_html(db, session_user, notice=ok_msg, notice_kind="info", assistant_result=result, form_values=values)
+        return Response(content=html, media_type="text/html")
+    except HTTPException as exc:
+        html = _render_saas_dashboard_html(db, session_user, notice=_ERROS_AMIGAVEIS.get(exc.status_code, str(exc.detail)), notice_kind="error", form_values=values)
+        return Response(content=html, media_type="text/html", status_code=exc.status_code)
 
 
 @app.get("/reports/risk-alerts")
@@ -4377,6 +5234,16 @@ async def delete_operation(
     token = x_webhook_token or request.query_params.get("token")
     validate_webhook_token(str(token) if token is not None else None)
     db = get_db()
+    kind = str(request.query_params.get("kind") or "transacao").strip().lower()
+
+    if kind == "gold":
+        ok = db.cancel_gold_transaction(operation_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail="Operação guiada não encontrada")
+        return {
+            "mensagem": f"✅ Operação GT-{operation_id} cancelada",
+            "dados": {"id": operation_id, "status": "cancelada", "kind": "gold"},
+        }
 
     transacao = (
         db.client.table("transacoes")

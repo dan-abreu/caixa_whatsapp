@@ -1,4 +1,6 @@
 import os
+import hmac
+import hashlib
 import importlib
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -8,6 +10,43 @@ from typing import Any, Dict, List, Optional, cast
 
 class DatabaseError(Exception):
     pass
+
+
+_WEB_PIN_HASH_PREFIX = "pbkdf2_sha256"
+_WEB_PIN_HASH_ITERATIONS = 260000
+
+
+def _hash_web_pin(pin: str, salt: Optional[str] = None) -> str:
+    normalized_pin = str(pin or "").strip()
+    if not normalized_pin:
+        raise ValueError("PIN vazio")
+    salt_value = salt or os.urandom(16).hex()
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        normalized_pin.encode("utf-8"),
+        salt_value.encode("utf-8"),
+        _WEB_PIN_HASH_ITERATIONS,
+    ).hex()
+    return f"{_WEB_PIN_HASH_PREFIX}${_WEB_PIN_HASH_ITERATIONS}${salt_value}${digest}"
+
+
+def _verify_web_pin(pin: str, stored_hash: Optional[str]) -> bool:
+    normalized_pin = str(pin or "").strip()
+    if not normalized_pin or not stored_hash:
+        return False
+    try:
+        algorithm, iterations_raw, salt_value, expected_digest = str(stored_hash).split("$", 3)
+        if algorithm != _WEB_PIN_HASH_PREFIX:
+            return False
+        digest = hashlib.pbkdf2_hmac(
+            "sha256",
+            normalized_pin.encode("utf-8"),
+            salt_value.encode("utf-8"),
+            int(iterations_raw),
+        ).hex()
+        return hmac.compare_digest(digest, expected_digest)
+    except Exception:
+        return False
 
 
 class DatabaseClient:
@@ -161,6 +200,67 @@ class DatabaseClient:
         data = cast(List[Dict[str, Any]], response.data or [])
         return data[0] if data else None
 
+    def get_usuario_web_auth(self, telefone: str) -> Optional[Dict[str, Any]]:
+        try:
+            response = (
+                self.client.table("usuarios")
+                .select("id,nome,telefone,tipo_usuario,ativo,web_pin_hash,web_pin_updated_em")
+                .eq("telefone", telefone)
+                .eq("ativo", True)
+                .limit(1)
+                .execute()
+            )
+            data = cast(List[Dict[str, Any]], response.data or [])
+            return data[0] if data else None
+        except Exception:
+            usuario = self.get_usuario_by_telefone(telefone)
+            if not usuario:
+                return None
+            fallback = dict(usuario)
+            fallback["web_pin_hash"] = None
+            fallback["web_pin_updated_em"] = None
+            return fallback
+
+    def verify_usuario_web_pin(self, telefone: str, pin: str) -> Optional[Dict[str, Any]]:
+        usuario = self.get_usuario_web_auth(telefone)
+        if not usuario:
+            return None
+
+        stored_hash = usuario.get("web_pin_hash")
+        if stored_hash:
+            if not _verify_web_pin(pin, str(stored_hash)):
+                return None
+            verified = dict(usuario)
+            verified["web_pin_bootstrap_required"] = False
+            return verified
+
+        digits = "".join(ch for ch in str(telefone) if ch.isdigit())
+        bootstrap_pin = digits[-6:] if len(digits) >= 6 else digits
+        if not bootstrap_pin or str(pin).strip() != bootstrap_pin:
+            return None
+
+        verified = dict(usuario)
+        verified["web_pin_bootstrap_required"] = True
+        return verified
+
+    def set_usuario_web_pin(self, telefone: str, new_pin: str) -> Optional[Dict[str, Any]]:
+        payload = {
+            "web_pin_hash": _hash_web_pin(new_pin),
+            "web_pin_updated_em": datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            response = (
+                self.client.table("usuarios")
+                .update(payload)
+                .eq("telefone", telefone)
+                .eq("ativo", True)
+                .execute()
+            )
+            data = cast(List[Dict[str, Any]], response.data or [])
+            return data[0] if data else None
+        except Exception:
+            return None
+
     def get_last_cambio_para_usd(self, moeda: str) -> Optional[Decimal]:
         moeda_up = moeda.upper()
         if moeda_up == "USD":
@@ -249,13 +349,14 @@ class DatabaseClient:
         try:
             query = (
                 self.client.table("gold_transactions")
-                .select("id,tipo_operacao,peso,preco_usd,criado_em,contexto")
+                .select("*")
                 .order("criado_em", desc=False)
             )
             if end_iso:
                 query = query.lt("criado_em", end_iso)
             response = query.execute()
-            return cast(List[Dict[str, Any]], response.data or [])
+            rows = cast(List[Dict[str, Any]], response.data or [])
+            return [row for row in rows if str(row.get("status") or "registrada").lower() != "cancelada"]
         except Exception:
             return []
 
@@ -711,7 +812,13 @@ class DatabaseClient:
     ) -> Optional[Dict[str, Any]]:
         # Soft-fail if enterprise tables are not migrated yet.
         try:
-            header_response = self.client.table("gold_transactions").insert(payload).execute()
+            payload = dict(payload)
+            payload.setdefault("status", "registrada")
+            try:
+                header_response = self.client.table("gold_transactions").insert(payload).execute()
+            except Exception:
+                payload.pop("status", None)
+                header_response = self.client.table("gold_transactions").insert(payload).execute()
             header_data = cast(List[Dict[str, Any]], header_response.data or [])
             if not header_data:
                 return None
@@ -849,6 +956,59 @@ class DatabaseClient:
             return header
         except Exception:
             return None
+
+    def cancel_gold_transaction(self, operation_id: int, cancelled_by: Optional[str] = None) -> bool:
+        try:
+            header_response = (
+                self.client.table("gold_transactions")
+                .select("*")
+                .eq("id", operation_id)
+                .limit(1)
+                .execute()
+            )
+            header_rows = cast(List[Dict[str, Any]], header_response.data or [])
+            if not header_rows:
+                return False
+
+            header = header_rows[0]
+            if str(header.get("status") or "registrada").lower() == "cancelada":
+                return True
+
+            movimentacoes_response = (
+                self.client.table("caixas_movimentacoes")
+                .select("caixa_moeda,valor")
+                .eq("gold_transaction_id", operation_id)
+                .order("id", desc=False)
+                .execute()
+            )
+            movimentacoes = cast(List[Dict[str, Any]], movimentacoes_response.data or [])
+
+            for movimento in movimentacoes:
+                moeda = str(movimento.get("caixa_moeda") or "").upper()
+                if not moeda:
+                    continue
+                valor = Decimal(str(movimento.get("valor") or "0"))
+                saldo_atual = Decimal(str(self.get_saldo_caixa().get(moeda, "0")))
+                saldo_novo = saldo_atual - valor
+                self.client.table("caixas").update(
+                    {"saldo": str(saldo_novo), "atualizado_em": datetime.now(timezone.utc).isoformat()}
+                ).eq("moeda", moeda).execute()
+                self._record_caixa_movimentacao(
+                    caixa_moeda=moeda,
+                    tipo_operacao="ajuste",
+                    gold_transaction_id=operation_id,
+                    valor=(valor * Decimal("-1")),
+                    saldo_anterior=saldo_atual,
+                    saldo_posterior=saldo_novo,
+                    descricao=f"Reversao por cancelamento GT-{operation_id}",
+                    pessoa=str(header.get("pessoa") or cancelled_by or "sistema"),
+                )
+
+            self.client.table("gold_transactions").update({"status": "cancelada"}).eq("id", operation_id).execute()
+            self.sync_gold_inventory_ledger()
+            return True
+        except Exception:
+            return False
 
     def insert_transfer_money(
         self,
@@ -1008,24 +1168,32 @@ class DatabaseClient:
             # Count simple transacoes (quick flow)
             resp_t = (
                 self.client.table("transacoes")
-                .select("id,valor_total")
+                .select("id,valor_total,status")
                 .gte("data_hora", start_iso)
                 .lt("data_hora", end_iso)
                 .execute()
             )
-            t_rows = cast(List[Dict[str, Any]], resp_t.data or [])
+            t_rows = [
+                row
+                for row in cast(List[Dict[str, Any]], resp_t.data or [])
+                if str(row.get("status") or "registrada").lower() != "cancelada"
+            ]
             t_ops = len(t_rows)
             t_usd = sum((Decimal(str(r.get("valor_total", 0))) for r in t_rows), Decimal("0"))
 
             # Count enterprise gold_transactions (guided flow)
             resp_g = (
                 self.client.table("gold_transactions")
-                .select("id,total_usd,total_pago_usd,diferenca_usd")
+                .select("*")
                 .gte("criado_em", start_iso)
                 .lt("criado_em", end_iso)
                 .execute()
             )
-            g_rows = cast(List[Dict[str, Any]], resp_g.data or [])
+            g_rows = [
+                row
+                for row in cast(List[Dict[str, Any]], resp_g.data or [])
+                if str(row.get("status") or "registrada").lower() != "cancelada"
+            ]
             g_ops = len(g_rows)
             g_usd = sum((Decimal(str(r.get("total_usd", 0))) for r in g_rows), Decimal("0"))
             g_pago = sum((Decimal(str(r.get("total_pago_usd", 0))) for r in g_rows), Decimal("0"))
@@ -1050,12 +1218,16 @@ class DatabaseClient:
         try:
             response = (
                 self.client.table("gold_transactions")
-                .select("operador_id,total_usd,total_pago_usd,diferenca_usd")
+                .select("*")
                 .gte("criado_em", start_iso)
                 .lt("criado_em", end_iso)
                 .execute()
             )
-            rows = cast(List[Dict[str, Any]], response.data or [])
+            rows = [
+                row
+                for row in cast(List[Dict[str, Any]], response.data or [])
+                if str(row.get("status") or "registrada").lower() != "cancelada"
+            ]
             grouped: Dict[str, Dict[str, Decimal]] = {}
             for row in rows:
                 operador = str(row.get("operador_id", "desconhecido"))
@@ -1092,11 +1264,25 @@ class DatabaseClient:
     def get_gold_summary_by_currency(self, start_iso: str, end_iso: str) -> List[Dict[str, Any]]:
         # Soft-fail if enterprise tables are not migrated yet.
         try:
+            gt_response = (
+                self.client.table("gold_transactions")
+                .select("*")
+                .gte("criado_em", start_iso)
+                .lt("criado_em", end_iso)
+                .execute()
+            )
+            valid_ids = [
+                int(str(row.get("id")))
+                for row in cast(List[Dict[str, Any]], gt_response.data or [])
+                if row.get("id") is not None and str(row.get("status") or "registrada").lower() != "cancelada"
+            ]
+            if not valid_ids:
+                return []
+
             response = (
                 self.client.table("gold_payments")
                 .select("moeda,valor_moeda,valor_usd")
-                .gte("criado_em", start_iso)
-                .lt("criado_em", end_iso)
+                .in_("gold_transaction_id", valid_ids)
                 .execute()
             )
             rows = cast(List[Dict[str, Any]], response.data or [])
@@ -1145,11 +1331,7 @@ class DatabaseClient:
         try:
             gt_resp = (
                 self.client.table("gold_transactions")
-                .select(
-                    "id,tipo_operacao,origem,gold_type,teor,peso,preco_usd,"
-                    "total_usd,total_pago_usd,diferenca_usd,pessoa,forma_pagamento,"
-                    "observacoes,operador_id,contexto,criado_em"
-                )
+                .select("*")
                 .gte("criado_em", start_iso)
                 .lt("criado_em", end_iso)
                 .order("criado_em", desc=False)
@@ -1172,6 +1354,8 @@ class DatabaseClient:
                     payments_by_tx.setdefault(tid, []).append(p)
 
             for row in gt_rows:
+                if str(row.get("status") or "registrada").lower() == "cancelada":
+                    continue
                 tid = row.get("id")
                 tid_int = int(tid) if tid is not None else 0
                 criado_em = str(row.get("criado_em") or "")
@@ -1215,6 +1399,8 @@ class DatabaseClient:
             t_rows = cast(List[Dict[str, Any]], t_resp.data or [])
 
             for row in t_rows:
+                if str(row.get("status") or "registrada").lower() == "cancelada":
+                    continue
                 op = str(row.get("operador_id") or "")
                 ts = str(row.get("data_hora") or "")
 
@@ -1349,11 +1535,13 @@ class DatabaseClient:
         try:
             t_resp = (
                 self.client.table("transacoes")
-                .select("tipo_operacao,ativo_id,quantidade,moeda_liquidacao,valor_moeda,valor_total")
+                .select("tipo_operacao,ativo_id,quantidade,moeda_liquidacao,valor_moeda,valor_total,status")
                 .execute()
             )
             t_rows = cast(List[Dict[str, Any]], t_resp.data or [])
             for row in t_rows:
+                if str(row.get("status") or "registrada").lower() == "cancelada":
+                    continue
                 tipo = str(row.get("tipo_operacao", ""))
                 aid = int(row.get("ativo_id", 0))
                 qty = Decimal(str(row.get("quantidade", "0")))
@@ -1388,12 +1576,14 @@ class DatabaseClient:
         try:
             gt_resp = (
                 self.client.table("gold_transactions")
-                .select("id,tipo_operacao,peso,contexto")
+                .select("*")
                 .execute()
             )
             gt_rows = cast(List[Dict[str, Any]], gt_resp.data or [])
 
             for row in gt_rows:
+                if str(row.get("status") or "registrada").lower() == "cancelada":
+                    continue
                 gid = int(row.get("id", 0))
                 tipo = str(row.get("tipo_operacao", ""))
                 gt_tipo_map[gid] = tipo
@@ -1625,12 +1815,16 @@ class DatabaseClient:
         try:
             response = (
                 self.client.table("gold_transactions")
-                .select("id,criado_em,tipo_operacao,pessoa,operador_id,total_usd,total_pago_usd,diferenca_usd")
+                .select("*")
                 .gte("criado_em", start_iso)
                 .lt("criado_em", end_iso)
                 .execute()
             )
-            rows = cast(List[Dict[str, Any]], response.data or [])
+            rows = [
+                row
+                for row in cast(List[Dict[str, Any]], response.data or [])
+                if str(row.get("status") or "registrada").lower() != "cancelada"
+            ]
             rows.sort(key=lambda r: abs(Decimal(str(r.get("diferenca_usd", 0)))), reverse=True)
             return rows[: max(limit, 1)]
         except Exception:
@@ -1825,11 +2019,15 @@ class DatabaseClient:
         try:
             response = (
                 self.client.table("gold_transactions")
-                .select("id,tipo_operacao,peso,total_usd,total_pago_usd,diferenca_usd,operador_id")
+                .select("*")
                 .gte("criado_em", start)
                 .execute()
             )
-            rows = cast(List[Dict[str, Any]], response.data or [])
+            rows = [
+                row
+                for row in cast(List[Dict[str, Any]], response.data or [])
+                if str(row.get("status") or "registrada").lower() != "cancelada"
+            ]
         except Exception:
             return _empty()
 

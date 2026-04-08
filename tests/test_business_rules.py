@@ -1,10 +1,14 @@
 import unittest
 from decimal import Decimal
 
-from app.database import DatabaseClient
+from app.database import DatabaseClient, _hash_web_pin, _verify_web_pin
 from app.main import (
     _build_fifo_inventory_lots,
+    _derive_forma_pagamento_summary,
     _find_negative_caixa_balances,
+    _parse_decimal_from_text,
+    _parse_operation_reference,
+    _parse_web_payments_from_form,
     _preview_fifo_sale_consumption,
     _project_caixa_balances,
     _should_reset_guided_session_for_message,
@@ -72,12 +76,23 @@ class _FakeTable:
 class _FakeSupabaseClient:
     def __init__(self):
         self.store = {
+            "gold_transactions": [],
             "gold_inventory_lots": [],
             "gold_inventory_consumptions": [],
         }
 
     def table(self, name):
         return _FakeTable(self.store, name)
+
+
+class _FakeFXDB:
+    def get_last_cambio_para_usd(self, moeda):
+        rates = {
+            "EUR": Decimal("0.88"),
+            "SRD": Decimal("38"),
+            "BRL": Decimal("5.20"),
+        }
+        return rates.get(str(moeda).upper())
 
 
 class BusinessRulesTests(unittest.TestCase):
@@ -113,6 +128,15 @@ class BusinessRulesTests(unittest.TestCase):
         self.assertTrue(_should_reset_guided_session_for_message("caixa"))
         self.assertTrue(_should_reset_guided_session_for_message("extrato hoje"))
         self.assertFalse(_should_reset_guided_session_for_message("50000"))
+
+    def test_parse_operation_reference_distinguishes_guided_ids(self) -> None:
+        self.assertEqual(_parse_operation_reference("GT-24"), ("gold", 24))
+        self.assertEqual(_parse_operation_reference("T-15"), ("transacao", 15))
+        self.assertEqual(_parse_operation_reference("123"), ("transacao", 123))
+
+    def test_parse_decimal_from_text_returns_invalid_sentinel_for_text(self) -> None:
+        self.assertEqual(_parse_decimal_from_text("USD", "preco_usd"), Decimal("-1"))
+        self.assertEqual(_parse_decimal_from_text("abc", "peso"), Decimal("-1"))
 
     def test_sync_gold_inventory_ledger_persists_fifo_state(self) -> None:
         db = DatabaseClient.__new__(DatabaseClient)
@@ -171,6 +195,45 @@ class BusinessRulesTests(unittest.TestCase):
         self.assertEqual(Decimal(str(status["inventory_cost_usd"])), Decimal("2400.00"))
         self.assertEqual(Decimal(str(status["avg_cost_usd_per_gram"])), Decimal("80.00"))
         self.assertEqual(len(status["open_lots"]), 1)
+
+    def test_get_gold_inventory_transactions_ignores_cancelled_rows(self) -> None:
+        db = DatabaseClient.__new__(DatabaseClient)
+        db.client = _FakeSupabaseClient()
+        db.client.store["gold_transactions"] = [
+            {"id": 1, "tipo_operacao": "compra", "peso": "10", "preco_usd": "100", "criado_em": "2026-04-01T10:00:00+00:00", "status": "registrada"},
+            {"id": 2, "tipo_operacao": "venda", "peso": "5", "preco_usd": "120", "criado_em": "2026-04-01T11:00:00+00:00", "status": "cancelada"},
+        ]
+
+        rows = db.get_gold_inventory_transactions()
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["id"], 1)
+
+    def test_web_pin_hash_roundtrip(self) -> None:
+        pin_hash = _hash_web_pin("123456", salt="fixed-salt")
+
+        self.assertTrue(_verify_web_pin("123456", pin_hash))
+        self.assertFalse(_verify_web_pin("654321", pin_hash))
+
+    def test_parse_web_payments_supports_multi_currency_rows(self) -> None:
+        pagamentos = _parse_web_payments_from_form(
+            _FakeFXDB(),
+            {
+                "payment_1_moeda": "USD",
+                "payment_1_valor": "100",
+                "payment_1_cambio": "1",
+                "payment_1_forma": "dinheiro",
+                "payment_2_moeda": "SRD",
+                "payment_2_valor": "380",
+                "payment_2_cambio": "",
+                "payment_2_forma": "transferencia",
+            },
+        )
+
+        self.assertEqual(len(pagamentos), 2)
+        self.assertEqual(pagamentos[0]["moeda"], "USD")
+        self.assertEqual(Decimal(str(pagamentos[1]["valor_usd"])), Decimal("10.00"))
+        self.assertEqual(_derive_forma_pagamento_summary(pagamentos), "misto")
 
 
 if __name__ == "__main__":

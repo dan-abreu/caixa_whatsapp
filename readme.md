@@ -176,6 +176,24 @@ Operações:
 
 - `POST /operations/{operation_id}/edit`
 
+Painel web SaaS:
+
+- `GET /saas`
+- `GET /saas/dashboard`
+- `POST /saas/login`
+- `POST /saas/logout`
+- `POST /saas/profile/pin`
+- `POST /saas/console`
+- `POST /saas/operations/quick`
+
+## Acesso web SaaS
+
+- O painel web agora usa sessão HTTP com login por operador, sem token na URL.
+- Login: informe o telefone cadastrado em `usuarios` e o PIN web.
+- Primeiro acesso apos aplicar a migracao: se `web_pin_hash` estiver vazio, o PIN temporario sao os ultimos 6 digitos do telefone.
+- Apos entrar, troque o PIN no proprio painel em `Seguranca do Acesso`.
+- O formulario rapido web aceita ate 4 pagamentos por operacao, com moedas `USD`, `EUR`, `SRD` e `BRL`.
+
 ## Teste rápido de webhook
 
 Com script PowerShell:

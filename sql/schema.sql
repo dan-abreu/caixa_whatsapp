@@ -35,6 +35,8 @@ CREATE TABLE IF NOT EXISTS usuarios (
     nome VARCHAR(120) NOT NULL,
     telefone VARCHAR(30) NOT NULL UNIQUE,
     tipo_usuario tipo_usuario NOT NULL,
+    web_pin_hash VARCHAR(255),
+    web_pin_updated_em TIMESTAMPTZ,
     ativo BOOLEAN NOT NULL DEFAULT TRUE,
     criado_em TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -109,6 +111,7 @@ CREATE TABLE IF NOT EXISTS gold_transactions (
     observacoes TEXT,
     operador_id VARCHAR(100) NOT NULL,
     source_message_id VARCHAR(120),
+    status VARCHAR(20) NOT NULL DEFAULT 'registrada',
     contexto JSONB NOT NULL DEFAULT '{}'::jsonb,
     criado_em TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -322,6 +325,26 @@ END$$;
 DO $$
 BEGIN
     IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'usuarios' AND column_name = 'web_pin_hash'
+    ) THEN
+        ALTER TABLE usuarios ADD COLUMN web_pin_hash VARCHAR(255);
+    END IF;
+END$$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'usuarios' AND column_name = 'web_pin_updated_em'
+    ) THEN
+        ALTER TABLE usuarios ADD COLUMN web_pin_updated_em TIMESTAMPTZ;
+    END IF;
+END$$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
         SELECT 1 FROM pg_constraint WHERE conname = 'chk_logs_nivel'
     ) THEN
         ALTER TABLE logs
@@ -343,6 +366,18 @@ END$$;
 
 DO $$
 BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_name = 'gold_transactions' AND column_name = 'status'
+    ) THEN
+        ALTER TABLE gold_transactions ADD COLUMN status VARCHAR(20) NOT NULL DEFAULT 'registrada';
+    END IF;
+
+    UPDATE gold_transactions
+    SET status = 'registrada'
+    WHERE status IS NULL;
+
     IF NOT EXISTS (
         SELECT 1 FROM pg_constraint WHERE conname = 'chk_gold_transactions_tipo_operacao'
     ) THEN
@@ -419,6 +454,14 @@ BEGIN
         ALTER TABLE gold_transactions
             ADD CONSTRAINT chk_gold_transactions_fechamento_le_peso
             CHECK (fechamento_gramas <= peso);
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'chk_gold_transactions_status'
+    ) THEN
+        ALTER TABLE gold_transactions
+            ADD CONSTRAINT chk_gold_transactions_status
+            CHECK (status IN ('registrada', 'cancelada'));
     END IF;
 END$$;
 
