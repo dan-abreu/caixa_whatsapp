@@ -3,13 +3,13 @@
 Teste Completo do Sistema Caixa Inteligente
 """
 
+# ruff: noqa: E402
+
 import os
 import json
 import sys
 from pathlib import Path
 from datetime import datetime, timezone
-from decimal import Decimal
-from typing import Any, Dict, List
 
 # Must be called before any FastAPI imports for mocking
 os.environ.setdefault("WEBHOOK_TOKEN", "test_token_12345")
@@ -286,7 +286,7 @@ print("-" * 80)
 
 try:
     from app.ai_service import _sanitize_extracted_payload
-    
+
     sanitization_tests = [
         {
             "name": "Payload Valido - Registrar Operacao",
@@ -497,4 +497,4 @@ print("=" * 80)
 # Save report to file
 with open("test_report.json", "w") as f:
     json.dump(report, f, indent=2)
-    print(f"\n📄 Relatorio salvo em: test_report.json")
+    print("\n📄 Relatorio salvo em: test_report.json")

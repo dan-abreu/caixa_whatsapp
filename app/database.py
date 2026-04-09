@@ -5,7 +5,10 @@ import importlib
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from math import sqrt
+from time import monotonic
 from typing import Any, Dict, List, Optional, cast
+
+from app.shared_cache import get_shared_cache
 
 
 class DatabaseError(Exception):
@@ -14,6 +17,7 @@ class DatabaseError(Exception):
 
 _WEB_PIN_HASH_PREFIX = "pbkdf2_sha256"
 _WEB_PIN_HASH_ITERATIONS = 260000
+_CLIENT_BALANCE_CURRENCIES = ("XAU", "USD", "EUR", "SRD", "BRL")
 
 
 def _hash_web_pin(pin: str, salt: Optional[str] = None) -> str:
@@ -49,7 +53,94 @@ def _verify_web_pin(pin: str, stored_hash: Optional[str]) -> bool:
         return False
 
 
+def _empty_cliente_balance_snapshot() -> Dict[str, Decimal]:
+    return {currency: Decimal("0") for currency in _CLIENT_BALANCE_CURRENCIES}
+
+
+def _aggregate_cliente_movements(movements: List[Dict[str, Any]]) -> Dict[str, Decimal]:
+    balances = _empty_cliente_balance_snapshot()
+    for row in movements:
+        moeda = str(row.get("moeda") or "").upper()
+        if moeda not in balances:
+            continue
+        try:
+            balances[moeda] += Decimal(str(row.get("valor") or "0"))
+        except Exception:
+            continue
+    return balances
+
+
+def _aggregate_cliente_movements_by_client(movements: List[Dict[str, Any]]) -> Dict[int, Dict[str, Decimal]]:
+    balances_by_client: Dict[int, Dict[str, Decimal]] = {}
+    for row in movements:
+        try:
+            cliente_id = int(str(row.get("cliente_id") or 0))
+        except Exception:
+            continue
+        if cliente_id <= 0:
+            continue
+        balances = balances_by_client.setdefault(cliente_id, _empty_cliente_balance_snapshot())
+        moeda = str(row.get("moeda") or "").upper()
+        if moeda not in balances:
+            continue
+        try:
+            balances[moeda] += Decimal(str(row.get("valor") or "0"))
+        except Exception:
+            continue
+    return balances_by_client
+
+
 class DatabaseClient:
+    _USUARIOS_WEB_PIN_SCHEMA_READY: Optional[bool] = None
+    _CAIXAS_READY: Optional[bool] = None
+    _FX_RATES_SCHEMA_READY: Optional[bool] = None
+    _GOLD_PENDING_CLOSURE_SCHEMA_READY: Optional[bool] = None
+    _RUNTIME_CACHE_TTL_SECONDS = float(os.getenv("DATABASE_RUNTIME_CACHE_TTL_SECONDS", "15"))
+    _RUNTIME_CACHE: Dict[str, Any] = {}
+
+    @classmethod
+    def _shared_cache_key(cls, key: str) -> str:
+        return f"database:{key}"
+
+    @classmethod
+    def _cliente_account_snapshot_cache_key(cls, cliente_id: int) -> str:
+        return f"cliente_account_snapshot:{cliente_id}"
+
+    @classmethod
+    def _clientes_with_balances_cache_key(cls, limit: int, search: Optional[str] = None) -> str:
+        normalized_search = str(search or "").strip().lower() or "default"
+        return f"clientes_with_balances:{normalized_search}:{limit}"
+
+    @classmethod
+    def _cliente_search_cache_key(cls, query: str, limit: int) -> str:
+        normalized_query = str(query or "").strip().lower()
+        return f"clientes_search:{normalized_query}:{limit}"
+
+    @classmethod
+    def _usuario_web_auth_cache_key(cls, telefone: str) -> str:
+        return f"usuario_web_auth:{str(telefone or '').strip()}"
+
+    @classmethod
+    def _gold_inventory_status_cache_key(cls, open_only: bool) -> str:
+        return f"gold_inventory_status:{'open' if open_only else 'all'}"
+
+    @classmethod
+    def _invalidate_cliente_account_snapshot_cache(cls, cliente_id: int) -> None:
+        if cliente_id <= 0:
+            return
+        cls._invalidate_runtime_cache(cls._cliente_account_snapshot_cache_key(cliente_id))
+
+    @classmethod
+    def _invalidate_client_list_cache(cls) -> None:
+        keys_to_clear = [
+            key
+            for key in list(cls._RUNTIME_CACHE.keys())
+            if str(key).startswith("clientes_with_balances:") or str(key).startswith("clientes_search:")
+        ]
+        if not keys_to_clear:
+            return
+        cls._invalidate_runtime_cache(*keys_to_clear)
+
     def __init__(self) -> None:
         url = os.getenv("SUPABASE_URL")
         key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY")
@@ -65,6 +156,79 @@ class DatabaseClient:
 
         self.client: Any = create_client(url, key)
 
+    @classmethod
+    def _get_runtime_cache(cls, key: str) -> Optional[Any]:
+        cached = cls._RUNTIME_CACHE.get(key)
+        if not cached:
+            shared_cache = get_shared_cache()
+            if shared_cache is None:
+                return None
+            shared_value = shared_cache.get_json(cls._shared_cache_key(key))
+            if shared_value is None:
+                return None
+            cls._RUNTIME_CACHE[key] = (monotonic() + cls._RUNTIME_CACHE_TTL_SECONDS, shared_value)
+            return shared_value
+        expires_at = float(cached[0])
+        if expires_at <= monotonic():
+            cls._RUNTIME_CACHE.pop(key, None)
+            shared_cache = get_shared_cache()
+            if shared_cache is None:
+                return None
+            shared_value = shared_cache.get_json(cls._shared_cache_key(key))
+            if shared_value is None:
+                return None
+            cls._RUNTIME_CACHE[key] = (monotonic() + cls._RUNTIME_CACHE_TTL_SECONDS, shared_value)
+            return shared_value
+        return cached[1]
+
+    @classmethod
+    def _get_local_runtime_cache(cls, key: str) -> Optional[Any]:
+        cached = cls._RUNTIME_CACHE.get(key)
+        if not cached:
+            return None
+        expires_at = float(cached[0])
+        if expires_at <= monotonic():
+            cls._RUNTIME_CACHE.pop(key, None)
+            return None
+        return cached[1]
+
+    @classmethod
+    def _set_runtime_cache(cls, key: str, value: Any) -> Any:
+        cls._RUNTIME_CACHE[key] = (monotonic() + cls._RUNTIME_CACHE_TTL_SECONDS, value)
+        shared_cache = get_shared_cache()
+        if shared_cache is not None:
+            shared_cache.set_json(cls._shared_cache_key(key), value, cls._RUNTIME_CACHE_TTL_SECONDS)
+        return value
+
+    @classmethod
+    def _set_local_runtime_cache(cls, key: str, value: Any) -> Any:
+        cls._RUNTIME_CACHE[key] = (monotonic() + cls._RUNTIME_CACHE_TTL_SECONDS, value)
+        return value
+
+    @classmethod
+    def _invalidate_runtime_cache(cls, *keys: str) -> None:
+        if not keys:
+            cls._RUNTIME_CACHE.clear()
+            return
+        for key in keys:
+            cls._RUNTIME_CACHE.pop(key, None)
+        shared_cache = get_shared_cache()
+        if shared_cache is not None:
+            shared_cache.delete(*(cls._shared_cache_key(key) for key in keys))
+
+    def _is_missing_usuario_web_pin_schema_error(self, exc: Exception) -> bool:
+        message = str(exc or "")
+        if "42703" not in message and "does not exist" not in message:
+            return False
+        return "usuarios.web_pin_hash" in message or "usuarios.web_pin_updated_em" in message
+
+    def _is_missing_fx_rates_schema_error(self, exc: Exception) -> bool:
+        message = str(exc or "")
+        lowered = message.lower()
+        if "fx_rates" not in lowered:
+            return False
+        return "404" in lowered or "does not exist" in lowered or "pgrst" in lowered or "42p01" in lowered
+
     def _safe_record_fx_rate(
         self,
         base_currency: str,
@@ -75,6 +239,8 @@ class DatabaseClient:
         """Best-effort FX snapshot for audit; no-op if table is not migrated yet."""
         if base_currency.upper() == quote_currency.upper():
             return
+        if type(self)._FX_RATES_SCHEMA_READY is False:
+            return
         try:
             payload: Dict[str, Any] = {
                 "base_currency": base_currency.upper(),
@@ -84,7 +250,10 @@ class DatabaseClient:
                 "captured_at": datetime.now(timezone.utc).isoformat(),
             }
             self.client.table("fx_rates").insert(payload).execute()
-        except Exception:
+            type(self)._FX_RATES_SCHEMA_READY = True
+        except Exception as exc:
+            if self._is_missing_fx_rates_schema_error(exc):
+                type(self)._FX_RATES_SCHEMA_READY = False
             return
 
     def _safe_record_journal_entry(
@@ -198,13 +367,18 @@ class DatabaseClient:
             .execute()
         )
         data = cast(List[Dict[str, Any]], response.data or [])
+        self._invalidate_runtime_cache(self._usuario_web_auth_cache_key(telefone))
         return data[0] if data else None
 
     def get_usuario_web_auth(self, telefone: str) -> Optional[Dict[str, Any]]:
+        cache_key = self._usuario_web_auth_cache_key(telefone)
+        cached = self._get_local_runtime_cache(cache_key)
+        if cached is not None:
+            return cast(Optional[Dict[str, Any]], cached)
         try:
             response = (
                 self.client.table("usuarios")
-                .select("id,nome,telefone,tipo_usuario,ativo,web_pin_hash,web_pin_updated_em")
+                .select("*")
                 .eq("telefone", telefone)
                 .eq("ativo", True)
                 .limit(1)
@@ -213,9 +387,17 @@ class DatabaseClient:
             data = cast(List[Dict[str, Any]], response.data or [])
             enriched = dict(data[0]) if data else None
             if enriched is not None:
-                enriched["web_pin_schema_ready"] = True
+                schema_ready = "web_pin_hash" in enriched and "web_pin_updated_em" in enriched
+                enriched.setdefault("web_pin_hash", None)
+                enriched.setdefault("web_pin_updated_em", None)
+                enriched["web_pin_schema_ready"] = schema_ready
+                type(self)._USUARIOS_WEB_PIN_SCHEMA_READY = schema_ready
+                if schema_ready:
+                    return cast(Optional[Dict[str, Any]], self._set_local_runtime_cache(cache_key, enriched))
             return enriched
-        except Exception:
+        except Exception as exc:
+            if self._is_missing_usuario_web_pin_schema_error(exc):
+                type(self)._USUARIOS_WEB_PIN_SCHEMA_READY = False
             usuario = self.get_usuario_by_telefone(telefone)
             if not usuario:
                 return None
@@ -224,6 +406,275 @@ class DatabaseClient:
             fallback["web_pin_updated_em"] = None
             fallback["web_pin_schema_ready"] = False
             return fallback
+
+    def _cliente_fields(self) -> str:
+        return "id,nome,apelido,telefone,documento,observacoes,ativo,criado_em,atualizado_em"
+
+    def _base_cliente_select(self):
+        return self.client.table("clientes").select(self._cliente_fields())
+
+    def get_cliente_by_id(self, cliente_id: int) -> Optional[Dict[str, Any]]:
+        try:
+            response = self._base_cliente_select().eq("id", cliente_id).eq("ativo", True).limit(1).execute()
+            data = cast(List[Dict[str, Any]], response.data or [])
+            return data[0] if data else None
+        except Exception:
+            return None
+
+    def search_clientes(self, query: str, limit: int = 8) -> List[Dict[str, Any]]:
+        normalized_query = str(query or "").strip()
+        if not normalized_query:
+            return self.list_clientes(limit=limit)
+
+        cache_key = self._cliente_search_cache_key(normalized_query, limit)
+        cached = self._get_local_runtime_cache(cache_key)
+        if cached is not None:
+            return cast(List[Dict[str, Any]], cached)
+
+        results: Dict[int, Dict[str, Any]] = {}
+        filters = [
+            ("nome", f"%{normalized_query}%"),
+            ("apelido", f"%{normalized_query}%"),
+            ("telefone", f"%{normalized_query}%"),
+            ("documento", f"%{normalized_query}%"),
+        ]
+        for field, value in filters:
+            try:
+                response = self._base_cliente_select().eq("ativo", True).ilike(field, value).limit(limit).execute()
+                data = cast(List[Dict[str, Any]], response.data or [])
+                for row in data:
+                    client_id = int(row.get("id") or 0)
+                    if client_id <= 0:
+                        continue
+                    results[client_id] = dict(row)
+            except Exception:
+                continue
+
+        ordered = sorted(
+            results.values(),
+            key=lambda item: (
+                str(item.get("nome") or "").lower() != normalized_query.lower(),
+                str(item.get("nome") or "").lower(),
+                int(item.get("id") or 0),
+            ),
+        )
+        return cast(List[Dict[str, Any]], self._set_local_runtime_cache(cache_key, ordered[:limit]))
+
+    def list_clientes(self, limit: int = 40) -> List[Dict[str, Any]]:
+        try:
+            response = self._base_cliente_select().eq("ativo", True).order("atualizado_em", desc=True).limit(limit).execute()
+            return cast(List[Dict[str, Any]], response.data or [])
+        except Exception:
+            return []
+
+    def _insert_cliente_movements(self, rows: List[Dict[str, Any]]) -> None:
+        if not rows:
+            return
+        try:
+            self.client.table("cliente_movimentacoes").insert(rows).execute()
+        except Exception:
+            return
+
+    def create_cliente(
+        self,
+        nome: str,
+        telefone: Optional[str] = None,
+        documento: Optional[str] = None,
+        apelido: Optional[str] = None,
+        observacoes: Optional[str] = None,
+        opening_balances: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        normalized_name = str(nome or "").strip()
+        if not normalized_name:
+            return None
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        payload: Dict[str, Any] = {
+            "nome": normalized_name,
+            "telefone": str(telefone or "").strip() or None,
+            "documento": str(documento or "").strip() or None,
+            "apelido": str(apelido or "").strip() or None,
+            "observacoes": str(observacoes or "").strip() or None,
+            "ativo": True,
+            "criado_em": now_iso,
+            "atualizado_em": now_iso,
+        }
+        try:
+            response = self.client.table("clientes").insert(payload).execute()
+            data = cast(List[Dict[str, Any]], response.data or [])
+            if not data:
+                return None
+            cliente = dict(data[0])
+            cliente_id = int(cliente.get("id") or 0)
+            if cliente_id > 0:
+                movement_rows: List[Dict[str, Any]] = []
+                for moeda, raw_value in (opening_balances or {}).items():
+                    currency = str(moeda or "").upper()
+                    if currency not in _CLIENT_BALANCE_CURRENCIES:
+                        continue
+                    value = Decimal(str(raw_value or "0"))
+                    if value == 0:
+                        continue
+                    movement_rows.append(
+                        {
+                            "cliente_id": cliente_id,
+                            "gold_transaction_id": None,
+                            "moeda": currency,
+                            "tipo_movimento": "abertura",
+                            "valor": str(value),
+                            "descricao": "Saldo inicial de cadastro",
+                            "metadata": {"origem": "cadastro_cliente"},
+                            "criado_em": now_iso,
+                        }
+                    )
+                self._insert_cliente_movements(movement_rows)
+            self._invalidate_client_list_cache()
+            return cliente
+        except Exception:
+            return None
+
+    def get_cliente_movements(self, cliente_id: int, limit: int = 50) -> List[Dict[str, Any]]:
+        try:
+            response = (
+                self.client.table("cliente_movimentacoes")
+                .select("id,cliente_id,gold_transaction_id,moeda,tipo_movimento,valor,descricao,metadata,criado_em")
+                .eq("cliente_id", cliente_id)
+                .order("criado_em", desc=True)
+                .limit(limit)
+                .execute()
+            )
+            return cast(List[Dict[str, Any]], response.data or [])
+        except Exception:
+            return []
+
+    def get_cliente_balance_summary(self, cliente_id: int) -> Dict[str, Decimal]:
+        movements = self.get_cliente_movements(cliente_id, limit=500)
+        return _aggregate_cliente_movements(movements)
+
+    def get_cliente_balance_summaries(self, cliente_ids: List[int]) -> Dict[int, Dict[str, Decimal]]:
+        normalized_ids: List[int] = []
+        for cliente_id in cliente_ids:
+            try:
+                parsed_id = int(cliente_id)
+            except Exception:
+                continue
+            if parsed_id > 0:
+                normalized_ids.append(parsed_id)
+        normalized_ids = sorted(set(normalized_ids))
+        if not normalized_ids:
+            return {}
+        try:
+            response = (
+                self.client.table("cliente_movimentacoes")
+                .select("cliente_id,moeda,valor")
+                .in_("cliente_id", normalized_ids)
+                .execute()
+            )
+            movements = cast(List[Dict[str, Any]], response.data or [])
+            return _aggregate_cliente_movements_by_client(movements)
+        except Exception:
+            return {}
+
+    def get_cliente_recent_transactions(self, cliente_id: int, limit: int = 25) -> List[Dict[str, Any]]:
+        try:
+            response = (
+                self.client.table("gold_transactions")
+                .select("id,tipo_operacao,pessoa,peso,preco_usd,total_usd,total_pago_usd,fechamento_gramas,fechamento_tipo,status,criado_em")
+                .eq("cliente_id", cliente_id)
+                .order("criado_em", desc=True)
+                .limit(limit)
+                .execute()
+            )
+            rows = cast(List[Dict[str, Any]], response.data or [])
+            return [row for row in rows if str(row.get("status") or "registrada").lower() != "cancelada"]
+        except Exception:
+            return []
+
+    def get_cliente_account_snapshot(self, cliente_id: int) -> Optional[Dict[str, Any]]:
+        if cliente_id <= 0:
+            return None
+        cache_key = self._cliente_account_snapshot_cache_key(cliente_id)
+        cached = self._get_runtime_cache(cache_key)
+        if cached is not None:
+            return cast(Dict[str, Any], cached)
+
+        cliente = self.get_cliente_by_id(cliente_id)
+        if not cliente:
+            return None
+
+        movement_rows = self.get_cliente_movements(cliente_id, limit=500)
+        balances = _aggregate_cliente_movements(movement_rows)
+        recent_transactions = self.get_cliente_recent_transactions(cliente_id)
+        snapshot: Dict[str, Any] = {
+            "cliente": cliente,
+            "balances": {currency: str(value) for currency, value in balances.items()},
+            "recent_transactions": recent_transactions,
+            "movements": movement_rows[:50],
+        }
+        return cast(Dict[str, Any], self._set_runtime_cache(cache_key, snapshot))
+
+    def list_clientes_with_balances(self, search: Optional[str] = None, limit: int = 40) -> List[Dict[str, Any]]:
+        normalized_search = str(search or "").strip()
+        cache_key = self._clientes_with_balances_cache_key(limit, normalized_search)
+        cached = self._get_local_runtime_cache(cache_key) if normalized_search else self._get_runtime_cache(cache_key)
+        if cached is not None:
+            return cast(List[Dict[str, Any]], cached)
+
+        clientes = self.search_clientes(normalized_search, limit=limit) if normalized_search else self.list_clientes(limit=limit)
+        client_ids = [int(cliente.get("id") or 0) for cliente in clientes if int(cliente.get("id") or 0) > 0]
+        balances_by_client = self.get_cliente_balance_summaries(client_ids)
+        enriched: List[Dict[str, Any]] = []
+        for cliente in clientes:
+            client_id = int(cliente.get("id") or 0)
+            if client_id <= 0:
+                continue
+            balances = balances_by_client.get(client_id, _empty_cliente_balance_snapshot())
+            item = dict(cliente)
+            item["balances"] = {currency: str(value) for currency, value in balances.items()}
+            enriched.append(item)
+        if normalized_search:
+            return cast(List[Dict[str, Any]], self._set_local_runtime_cache(cache_key, enriched))
+        return cast(List[Dict[str, Any]], self._set_runtime_cache(cache_key, enriched))
+
+    def record_cliente_operation_balance(
+        self,
+        cliente_id: int,
+        gold_transaction_id: int,
+        tipo_operacao: str,
+        pending_grams: Decimal,
+        pessoa: Optional[str] = None,
+        reverse: bool = False,
+    ) -> None:
+        if cliente_id <= 0 or pending_grams <= 0:
+            return
+        signed_value = pending_grams if str(tipo_operacao).lower() == "compra" else (pending_grams * Decimal("-1"))
+        if reverse:
+            signed_value *= Decimal("-1")
+        now_iso = datetime.now(timezone.utc).isoformat()
+        movement_type = "operacao_pendente_estorno" if reverse else "operacao_pendente"
+        description = f"Saldo em ouro da operacao GT-{gold_transaction_id}"
+        if reverse:
+            description = f"Estorno do saldo em ouro da operacao GT-{gold_transaction_id}"
+        self._insert_cliente_movements(
+            [
+                {
+                    "cliente_id": cliente_id,
+                    "gold_transaction_id": gold_transaction_id,
+                    "moeda": "XAU",
+                    "tipo_movimento": movement_type,
+                    "valor": str(signed_value),
+                    "descricao": description,
+                    "metadata": {
+                        "tipo_operacao": tipo_operacao,
+                        "pessoa": pessoa,
+                        "pending_grams": str(pending_grams),
+                    },
+                    "criado_em": now_iso,
+                }
+            ]
+        )
+        self._invalidate_cliente_account_snapshot_cache(cliente_id)
+        self._invalidate_client_list_cache()
 
     def verify_usuario_web_pin(self, telefone: str, pin: str) -> Optional[Dict[str, Any]]:
         usuario = self.get_usuario_web_auth(telefone)
@@ -252,6 +703,12 @@ class DatabaseClient:
             "web_pin_hash": _hash_web_pin(new_pin),
             "web_pin_updated_em": datetime.now(timezone.utc).isoformat(),
         }
+        if type(self)._USUARIOS_WEB_PIN_SCHEMA_READY is False:
+            return {
+                "telefone": telefone,
+                "web_pin_schema_ready": False,
+                "error": "usuarios web pin schema unavailable",
+            }
         try:
             response = (
                 self.client.table("usuarios")
@@ -264,9 +721,15 @@ class DatabaseClient:
             if data:
                 updated = dict(data[0])
                 updated["web_pin_schema_ready"] = True
+                type(self)._USUARIOS_WEB_PIN_SCHEMA_READY = True
+                self._invalidate_runtime_cache(self._usuario_web_auth_cache_key(telefone))
                 return updated
+            type(self)._USUARIOS_WEB_PIN_SCHEMA_READY = True
+            self._invalidate_runtime_cache(self._usuario_web_auth_cache_key(telefone))
             return {"telefone": telefone, "web_pin_schema_ready": True}
         except Exception as exc:
+            if self._is_missing_usuario_web_pin_schema_error(exc):
+                type(self)._USUARIOS_WEB_PIN_SCHEMA_READY = False
             return {
                 "telefone": telefone,
                 "web_pin_schema_ready": False,
@@ -278,58 +741,56 @@ class DatabaseClient:
         if moeda_up == "USD":
             return Decimal("1")
 
+        snapshot = self.get_last_cambio_para_usd_map([moeda_up])
+        return snapshot.get(moeda_up)
+
+    def get_last_cambio_para_usd_map(self, moedas: List[str]) -> Dict[str, Decimal]:
+        requested = [str(moeda or "").upper() for moeda in moedas if str(moeda or "").strip()]
+        targets = sorted({moeda for moeda in requested if moeda != "USD"})
+        result: Dict[str, Decimal] = {"USD": Decimal("1")}
+        if not targets:
+            return result
+
         try:
-            # 1) Legacy/simple flow source
-            response = (
+            legacy_response = (
                 self.client.table("transacoes")
-                .select("cambio_para_usd")
-                .eq("moeda_liquidacao", moeda_up)
+                .select("moeda_liquidacao,cambio_para_usd,data_hora")
+                .in_("moeda_liquidacao", targets)
                 .not_.is_("cambio_para_usd", "null")
                 .order("data_hora", desc=True)
-                .limit(1)
                 .execute()
             )
-            data = cast(List[Dict[str, Any]], response.data or [])
-            if data:
-                val = Decimal(str(data[0].get("cambio_para_usd", "0")))
+            for row in cast(List[Dict[str, Any]], legacy_response.data or []):
+                moeda = str(row.get("moeda_liquidacao") or "").upper()
+                if moeda in result:
+                    continue
+                val = Decimal(str(row.get("cambio_para_usd", "0")))
                 if val > 0:
-                    return val
+                    result[moeda] = val
 
-            # 2) Enterprise payments source
-            gp_resp = (
+            pending = [moeda for moeda in targets if moeda not in result]
+            if pending:
+                gp_resp = (
                 self.client.table("gold_payments")
-                .select("cambio_para_usd")
-                .eq("moeda", moeda_up)
-                .not_.is_("cambio_para_usd", "null")
-                .order("id", desc=True)
-                .limit(1)
-                .execute()
-            )
-            gp_data = cast(List[Dict[str, Any]], gp_resp.data or [])
-            if gp_data:
-                val = Decimal(str(gp_data[0].get("cambio_para_usd", "0")))
-                if val > 0:
-                    return val
+                    .select("moeda,cambio_para_usd,id")
+                    .in_("moeda", pending)
+                    .not_.is_("cambio_para_usd", "null")
+                    .order("id", desc=True)
+                    .execute()
+                )
+                for row in cast(List[Dict[str, Any]], gp_resp.data or []):
+                    moeda = str(row.get("moeda") or "").upper()
+                    if moeda in result:
+                        continue
+                    val = Decimal(str(row.get("cambio_para_usd", "0")))
+                    if val > 0:
+                        result[moeda] = val
 
-            # 3) Dedicated FX snapshot source
-            fx_resp = (
-                self.client.table("fx_rates")
-                .select("rate")
-                .eq("base_currency", "USD")
-                .eq("quote_currency", moeda_up)
-                .order("captured_at", desc=True)
-                .limit(1)
-                .execute()
-            )
-            fx_data = cast(List[Dict[str, Any]], fx_resp.data or [])
-            if fx_data:
-                val = Decimal(str(fx_data[0].get("rate", "0")))
-                if val > 0:
-                    return val
-
-            return None
-        except Exception:
-            return None
+            return result
+        except Exception as exc:
+            if self._is_missing_fx_rates_schema_error(exc):
+                type(self)._FX_RATES_SCHEMA_READY = False
+            return {moeda: valor for moeda, valor in result.items() if moeda in {"USD", *targets}}
 
     def insert_taxa_diaria(self, ativo_id: int, preco: Decimal, admin_id: str) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
@@ -402,7 +863,14 @@ class DatabaseClient:
                         "unit_cost_usd": str(preco_usd),
                         "total_cost_usd": str(peso * preco_usd),
                         "status": "open",
-                        "metadata": {"source": "sync", "tx_id": tx_id},
+                        "metadata": {
+                            "source": "sync",
+                            "tx_id": tx_id,
+                            "teor": str(tx.get("teor") or ""),
+                            "gold_type": str(tx.get("gold_type") or ""),
+                            "quebra": str(tx.get("quebra") or ""),
+                            "pessoa": str(tx.get("pessoa") or ""),
+                        },
                     }
                 )
                 lots_state.append(
@@ -411,6 +879,10 @@ class DatabaseClient:
                         "created_at_tx": criado_em,
                         "remaining_grams": peso,
                         "unit_cost_usd": preco_usd,
+                        "teor": str(tx.get("teor") or ""),
+                        "gold_type": str(tx.get("gold_type") or ""),
+                        "quebra": str(tx.get("quebra") or ""),
+                        "pessoa": str(tx.get("pessoa") or ""),
                     }
                 )
                 continue
@@ -482,22 +954,69 @@ class DatabaseClient:
             (Decimal(str(lot.get("remaining_grams") or "0")) for lot in lots_state),
             Decimal("0"),
         )
+        self._invalidate_runtime_cache(
+            "gold_inventory_overview",
+            self._gold_inventory_status_cache_key(open_only=False),
+            self._gold_inventory_status_cache_key(open_only=True),
+            "gold_pending_closure_grams",
+        )
         return {
             "lots": len(lot_rows),
             "consumptions": len(consumption_rows),
             "open_grams": str(open_grams),
         }
 
-    def get_gold_inventory_status(self) -> Dict[str, Any]:
+    def get_gold_inventory_status(self, inventory_transactions: Optional[List[Dict[str, Any]]] = None, *, open_only: bool = False) -> Dict[str, Any]:
+        cache_key = self._gold_inventory_status_cache_key(open_only)
+        if inventory_transactions is None:
+            cached = self._get_runtime_cache(cache_key)
+            if cached is not None:
+                return cast(Dict[str, Any], cached)
         try:
-            lots_resp = (
+            lots_query = (
                 self.client.table("gold_inventory_lots")
-                .select("id,source_transaction_id,created_at_tx,initial_grams,remaining_grams,unit_cost_usd,total_cost_usd,status")
+                .select("id,source_transaction_id,created_at_tx,initial_grams,remaining_grams,unit_cost_usd,total_cost_usd,status,metadata")
                 .order("created_at_tx", desc=False)
-                .execute()
             )
+            if open_only:
+                lots_query = lots_query.eq("status", "open")
+            lots_resp = lots_query.execute()
             lots = cast(List[Dict[str, Any]], lots_resp.data or [])
-            open_lots = [lot for lot in lots if str(lot.get("status") or "") == "open"]
+            has_any_lots = bool(lots)
+            if open_only and not has_any_lots:
+                any_lot_resp = self.client.table("gold_inventory_lots").select("id").limit(1).execute()
+                has_any_lots = bool(cast(List[Dict[str, Any]], any_lot_resp.data or []))
+            needs_transaction_fallback = False
+            for lot in lots:
+                if str(lot.get("status") or "") != "open":
+                    continue
+                metadata = cast(Dict[str, Any], lot.get("metadata") or {})
+                if any(field not in metadata for field in ("teor", "gold_type", "quebra", "pessoa")):
+                    needs_transaction_fallback = True
+                    break
+
+            tx_lookup: Dict[int, Dict[str, Any]] = {}
+            if needs_transaction_fallback:
+                tx_lookup = {
+                    int(tx.get("id") or 0): tx
+                    for tx in (inventory_transactions if inventory_transactions is not None else self.get_gold_inventory_transactions())
+                }
+
+            open_lots: List[Dict[str, Any]] = []
+            for lot in lots:
+                if str(lot.get("status") or "") != "open":
+                    continue
+                metadata = cast(Dict[str, Any], lot.get("metadata") or {})
+                source_tx = tx_lookup.get(int(lot.get("source_transaction_id") or 0)) or {}
+                open_lots.append(
+                    {
+                        **lot,
+                        "teor": metadata.get("teor") or source_tx.get("teor"),
+                        "gold_type": metadata.get("gold_type") or source_tx.get("gold_type"),
+                        "quebra": metadata.get("quebra") or source_tx.get("quebra"),
+                        "pessoa": metadata.get("pessoa") or source_tx.get("pessoa"),
+                    }
+                )
             available_grams = sum((Decimal(str(lot.get("remaining_grams") or "0")) for lot in open_lots), Decimal("0"))
             open_cost = sum(
                 (
@@ -508,13 +1027,97 @@ class DatabaseClient:
                 Decimal("0"),
             )
             avg_cost = (open_cost / available_grams) if available_grams > 0 else Decimal("0")
-            return {
+            result: Dict[str, Any] = {
                 "lots": lots,
                 "open_lots": open_lots,
                 "available_grams": str(available_grams),
                 "inventory_cost_usd": str(open_cost.quantize(Decimal("0.01"))),
                 "avg_cost_usd_per_gram": str(avg_cost.quantize(Decimal("0.01"))),
+                "has_any_lots": has_any_lots,
             }
+            if inventory_transactions is None:
+                return cast(Dict[str, Any], self._set_runtime_cache(cache_key, result))
+            return result
+        except Exception:
+            return {
+                "lots": [],
+                "open_lots": [],
+                "available_grams": "0",
+                "inventory_cost_usd": "0.00",
+                "avg_cost_usd_per_gram": "0.00",
+                "has_any_lots": False,
+            }
+
+    def get_gold_pending_closure_grams(self) -> Decimal:
+        cached = self._get_runtime_cache("gold_pending_closure_grams")
+        if cached is not None:
+            return Decimal(str(cached))
+        try:
+            select_fields = "peso,fechamento_gramas,fechamento_tipo,status"
+            if type(self)._GOLD_PENDING_CLOSURE_SCHEMA_READY is False:
+                select_fields = "peso,fechamento_gramas"
+            try:
+                response = self.client.table("gold_transactions").select(select_fields).execute()
+                type(self)._GOLD_PENDING_CLOSURE_SCHEMA_READY = select_fields != "peso,fechamento_gramas"
+            except Exception:
+                response = self.client.table("gold_transactions").select("peso,fechamento_gramas").execute()
+                type(self)._GOLD_PENDING_CLOSURE_SCHEMA_READY = False
+            rows = cast(List[Dict[str, Any]], response.data or [])
+            pending_total = Decimal("0")
+            for row in rows:
+                if str(row.get("status") or "registrada").lower() == "cancelada":
+                    continue
+                try:
+                    peso = Decimal(str(row.get("peso") or "0"))
+                    fechamento = Decimal(str(row.get("fechamento_gramas") or peso or "0"))
+                except Exception:
+                    continue
+                if peso <= 0:
+                    continue
+                if fechamento <= 0:
+                    fechamento = peso
+                aberto = max(Decimal("0"), peso - min(fechamento, peso))
+                fechamento_tipo = str(row.get("fechamento_tipo") or "total").lower()
+                if (fechamento_tipo == "parcial" or aberto > 0) and aberto > 0:
+                    pending_total += aberto
+            self._set_runtime_cache("gold_pending_closure_grams", str(pending_total))
+            return pending_total
+        except Exception:
+            self._set_runtime_cache("gold_pending_closure_grams", "0")
+            return Decimal("0")
+
+    def get_gold_inventory_overview(self) -> Dict[str, Any]:
+        cached = self._get_runtime_cache("gold_inventory_overview")
+        if cached is not None:
+            return cast(Dict[str, Any], cached)
+        try:
+            lots_resp = (
+                self.client.table("gold_inventory_lots")
+                .select("remaining_grams,unit_cost_usd,status")
+                .eq("status", "open")
+                .execute()
+            )
+            open_lots = cast(List[Dict[str, Any]], lots_resp.data or [])
+            available_grams = sum((Decimal(str(lot.get("remaining_grams") or "0")) for lot in open_lots), Decimal("0"))
+            open_cost = sum(
+                (
+                    Decimal(str(lot.get("remaining_grams") or "0"))
+                    * Decimal(str(lot.get("unit_cost_usd") or "0"))
+                    for lot in open_lots
+                ),
+                Decimal("0"),
+            )
+            avg_cost = (open_cost / available_grams) if available_grams > 0 else Decimal("0")
+            return self._set_runtime_cache(
+                "gold_inventory_overview",
+                {
+                "lots": open_lots,
+                "open_lots": open_lots,
+                "available_grams": str(available_grams),
+                "inventory_cost_usd": str(open_cost.quantize(Decimal("0.01"))),
+                "avg_cost_usd_per_gram": str(avg_cost.quantize(Decimal("0.01"))),
+                },
+            )
         except Exception:
             return {
                 "lots": [],
@@ -523,6 +1126,40 @@ class DatabaseClient:
                 "inventory_cost_usd": "0.00",
                 "avg_cost_usd_per_gram": "0.00",
             }
+
+    def update_gold_inventory_lot_monitor(
+        self,
+        lot_id: int,
+        monitor_payload: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        try:
+            current_resp = (
+                self.client.table("gold_inventory_lots")
+                .select("id,metadata")
+                .eq("id", lot_id)
+                .limit(1)
+                .execute()
+            )
+            current_rows = cast(List[Dict[str, Any]], current_resp.data or [])
+            if not current_rows:
+                return None
+            row = current_rows[0]
+            metadata = cast(Dict[str, Any], row.get("metadata") or {})
+            metadata["monitor"] = monitor_payload
+            update_resp = (
+                self.client.table("gold_inventory_lots")
+                .update({"metadata": metadata})
+                .eq("id", lot_id)
+                .execute()
+            )
+            data = cast(List[Dict[str, Any]], update_resp.data or [])
+            self._invalidate_runtime_cache(
+                self._gold_inventory_status_cache_key(open_only=False),
+                self._gold_inventory_status_cache_key(open_only=True),
+            )
+            return data[0] if data else row
+        except Exception:
+            return None
 
     def insert_transacao(
         self,
@@ -883,6 +1520,9 @@ class DatabaseClient:
             op_kind = str(payload.get("tipo_operacao", "compra"))
             peso = Decimal(str(payload.get("peso", 0)))
             pessoa = str(payload.get("pessoa", "N/A"))
+            cliente_id = int(payload.get("cliente_id") or 0)
+            fechamento_gramas = Decimal(str(payload.get("fechamento_gramas") or peso or "0"))
+            pending_grams = max(Decimal("0"), peso - fechamento_gramas)
             
             self.update_caixas_from_transaction(
                 gold_transaction_id=int(transaction_id),
@@ -963,7 +1603,25 @@ class DatabaseClient:
                 lines=journal_lines,
             )
 
+            if cliente_id > 0 and pending_grams > 0:
+                self.record_cliente_operation_balance(
+                    cliente_id=cliente_id,
+                    gold_transaction_id=int(transaction_id),
+                    tipo_operacao=op_kind,
+                    pending_grams=pending_grams,
+                    pessoa=pessoa,
+                )
+
             self.sync_gold_inventory_ledger()
+            self._invalidate_runtime_cache(
+                "saldo_caixa",
+                "gold_inventory_overview",
+                self._gold_inventory_status_cache_key(open_only=False),
+                self._gold_inventory_status_cache_key(open_only=True),
+                "gold_pending_closure_grams",
+            )
+            self._invalidate_cliente_account_snapshot_cache(cliente_id)
+            self._invalidate_client_list_cache()
 
             return header
         except Exception:
@@ -986,6 +1644,11 @@ class DatabaseClient:
             if str(header.get("status") or "registrada").lower() == "cancelada":
                 return True
 
+            cliente_id = int(header.get("cliente_id") or 0)
+            peso = Decimal(str(header.get("peso") or "0"))
+            fechamento_gramas = Decimal(str(header.get("fechamento_gramas") or peso or "0"))
+            pending_grams = max(Decimal("0"), peso - fechamento_gramas)
+
             movimentacoes_response = (
                 self.client.table("caixas_movimentacoes")
                 .select("caixa_moeda,valor")
@@ -1005,6 +1668,7 @@ class DatabaseClient:
                 self.client.table("caixas").update(
                     {"saldo": str(saldo_novo), "atualizado_em": datetime.now(timezone.utc).isoformat()}
                 ).eq("moeda", moeda).execute()
+                self._invalidate_runtime_cache("saldo_caixa")
                 self._record_caixa_movimentacao(
                     caixa_moeda=moeda,
                     tipo_operacao="ajuste",
@@ -1016,8 +1680,27 @@ class DatabaseClient:
                     pessoa=str(header.get("pessoa") or cancelled_by or "sistema"),
                 )
 
+            if cliente_id > 0 and pending_grams > 0:
+                self.record_cliente_operation_balance(
+                    cliente_id=cliente_id,
+                    gold_transaction_id=operation_id,
+                    tipo_operacao=str(header.get("tipo_operacao") or "compra"),
+                    pending_grams=pending_grams,
+                    pessoa=str(header.get("pessoa") or cancelled_by or "sistema"),
+                    reverse=True,
+                )
+
             self.client.table("gold_transactions").update({"status": "cancelada"}).eq("id", operation_id).execute()
             self.sync_gold_inventory_ledger()
+            self._invalidate_runtime_cache(
+                "saldo_caixa",
+                "gold_inventory_overview",
+                self._gold_inventory_status_cache_key(open_only=False),
+                self._gold_inventory_status_cache_key(open_only=True),
+                "gold_pending_closure_grams",
+            )
+            self._invalidate_cliente_account_snapshot_cache(cliente_id)
+            self._invalidate_client_list_cache()
             return True
         except Exception:
             return False
@@ -1362,20 +2045,21 @@ class DatabaseClient:
                 )
                 gp_rows = cast(List[Dict[str, Any]], gp_resp.data or [])
                 for p in gp_rows:
-                    tid = int(p.get("gold_transaction_id", 0))
+                    tid = int(str(p.get("gold_transaction_id", 0) or 0))
                     payments_by_tx.setdefault(tid, []).append(p)
 
             for row in gt_rows:
                 if str(row.get("status") or "registrada").lower() == "cancelada":
                     continue
-                tid = row.get("id")
-                tid_int = int(tid) if tid is not None else 0
+                transaction_id = row.get("id")
+                tid_int = int(str(transaction_id)) if transaction_id is not None else 0
                 criado_em = str(row.get("criado_em") or "")
                 operador = str(row.get("operador_id") or "")
                 gt_timestamps.append({"ts": criado_em, "op": operador})
                 result.append({
                     "source": "gold_transactions",
-                    "id": tid,
+                    "id": transaction_id,
+                    "cliente_id": row.get("cliente_id"),
                     "tipo_operacao": row.get("tipo_operacao"),
                     "origem": row.get("origem"),
                     "teor": row.get("teor"),
@@ -1492,13 +2176,32 @@ class DatabaseClient:
 
     def _ensure_caixas_exist(self) -> None:
         """Ensure all 5 caixas exist in the database."""
+        if type(self)._CAIXAS_READY is True:
+            return
+
         moedas = ["XAU", "EUR", "USD", "SRD", "BRL"]
-        for moeda in moedas:
+        try:
+            response = (
+                self.client.table("caixas")
+                .select("moeda")
+                .in_("moeda", moedas)
+                .execute()
+            )
+            existing = {
+                str(row.get("moeda") or "").upper()
+                for row in cast(List[Dict[str, Any]], response.data or [])
+            }
+        except Exception:
+            return
+
+        missing = [moeda for moeda in moedas if moeda not in existing]
+        for moeda in missing:
             try:
                 self.client.table("caixas").insert({"moeda": moeda, "saldo": "0"}).execute()
             except Exception:
-                # Already exists, which is fine
                 pass
+
+        type(self)._CAIXAS_READY = True
 
     def _record_caixa_movimentacao(
         self,
@@ -1702,6 +2405,8 @@ class DatabaseClient:
                     pessoa="sistema",
                 )
 
+        self._invalidate_runtime_cache("saldo_caixa")
+
         return {
             "before": current,
             "after": {k: str(v) for k, v in recalculated.items()},
@@ -1735,6 +2440,7 @@ class DatabaseClient:
                 saldo_posterior_xau = saldo_anterior_xau + movimento_xau
 
                 self.client.table("caixas").update({"saldo": str(saldo_posterior_xau), "atualizado_em": datetime.now(timezone.utc).isoformat()}).eq("moeda", "XAU").execute()
+                self._invalidate_runtime_cache("saldo_caixa")
 
                 self._record_caixa_movimentacao(
                     caixa_moeda="XAU",
@@ -1765,6 +2471,7 @@ class DatabaseClient:
                 saldo_posterior_moeda = saldo_anterior_moeda + movimento_moeda
 
                 self.client.table("caixas").update({"saldo": str(saldo_posterior_moeda), "atualizado_em": datetime.now(timezone.utc).isoformat()}).eq("moeda", moeda).execute()
+                self._invalidate_runtime_cache("saldo_caixa")
 
                 self._record_caixa_movimentacao(
                     caixa_moeda=moeda,
@@ -1794,6 +2501,9 @@ class DatabaseClient:
         
         Each cache is independent - no conversion, no USD reference.
         """
+        cached = self._get_runtime_cache("saldo_caixa")
+        if cached is not None:
+            return cast(Dict[str, Any], cached)
         try:
             self._ensure_caixas_exist()
             
@@ -1811,7 +2521,7 @@ class DatabaseClient:
                 if moeda not in result:
                     result[moeda] = "0"
             
-            return result
+            return self._set_runtime_cache("saldo_caixa", result)
         except Exception:
             # Fallback silently
             return {

@@ -28,6 +28,8 @@ caixa_whatsapp/
 |- scripts/
 |  |- apply_schema.ps1
 |  |- apply_schema.py
+|  |- apply_sql_file.ps1
+|  |- apply_sql_file.py
 |  |- backfill_caixas.py
 |  |- register_autostart.ps1
 |  |- simulate_whatsapp.py
@@ -37,6 +39,7 @@ caixa_whatsapp/
 |- sql/
 |  |- schema.sql
 |  |- schema_caixas.sql
+|  |- schema_clientes_upgrade.sql
 |  |- schema_enterprise_upgrade.sql
 |- tests/
 |- setup.ps1
@@ -92,6 +95,8 @@ Principais opcionais:
 
 - `APP_HOST` (default: `127.0.0.1`)
 - `APP_PORT` (default: `8000`)
+- `DATABASE_RUNTIME_CACHE_TTL_SECONDS` (default: `15`)
+- `REDIS_URL` ou `CACHE_REDIS_URL` (opcional, ativa cache compartilhado entre processos)
 - `GEMINI_MODEL` (default: `gemini-2.5-flash`)
 - `LOG_LEVEL` (default: `INFO`)
 - `TZ_OFFSET_HOURS` (default: `-3`)
@@ -112,6 +117,14 @@ Principais opcionais:
 - `AI_CONF_PROFILE` (`balanced`, `conservative`, `aggressive`, `auto`; default: `balanced`)
 - `TWILIO_REPLY_MODE` (`normal`, `silent_prefix`, `silent_all`)
 - `TWILIO_SILENT_PREFIX` (default: `debug:`)
+- `MARKET_CACHE_TTL_SECONDS` (default: `15`)
+- `MARKET_NEWS_CACHE_TTL_SECONDS` (default: `900`)
+- `MARKET_ALERT_THRESHOLD_PCT` (default: `0.50`)
+- `LOT_MONITOR_ENABLED` (default: `true`)
+- `LOT_MONITOR_INTERVAL_SECONDS` (default: `300`)
+- `TWILIO_ACCOUNT_SID` (obrigatoria para alerta outbound de lote)
+- `TWILIO_AUTH_TOKEN` (obrigatoria para alerta outbound de lote)
+- `TWILIO_WHATSAPP_FROM` (ex.: `whatsapp:+14155238886`)
 - `AI_LEXICON_PATH` (override opcional do léxico)
 
 Notas de governança do confidence score:
@@ -136,6 +149,20 @@ ou via Python:
 ```powershell
 .\.venv\Scripts\python.exe .\scripts\apply_schema.py
 ```
+
+Aplicar a migracao isolada de clientes em ambientes ja existentes:
+
+```powershell
+.\scripts\apply_sql_file.ps1 -SqlFile sql/schema_clientes_upgrade.sql
+```
+
+Uso generico para qualquer upgrade SQL isolado:
+
+```powershell
+.\scripts\apply_sql_file.ps1 -SqlFile sql\schema_enterprise_upgrade.sql
+```
+
+O script usa `SUPABASE_DB_URL` ou monta a conexao a partir de `SUPABASE_PROJECT_REF` + `SUPABASE_DB_PASSWORD`.
 
 Para ambientes antigos, se necessário recalcular saldos dos 5 caixas:
 
@@ -180,8 +207,15 @@ Painel web SaaS:
 
 - `GET /saas`
 - `GET /saas/dashboard`
+- `GET /saas/market-snapshot`
+- `GET /saas/market-news`
+- `GET /saas/clientes`
+- `GET /saas/clientes/{cliente_id}`
+- `GET /saas/clientes/search`
 - `POST /saas/login`
 - `POST /saas/logout`
+- `POST /saas/clientes`
+- `POST /saas/lots/{lot_id}/monitor`
 - `POST /saas/profile/pin`
 - `POST /saas/console`
 - `POST /saas/operations/quick`
@@ -193,6 +227,48 @@ Painel web SaaS:
 - Primeiro acesso apos aplicar a migracao: se `web_pin_hash` estiver vazio, o PIN temporario sao os ultimos 6 digitos do telefone.
 - Apos entrar, troque o PIN no proprio painel em `Seguranca do Acesso`.
 - O formulario rapido web aceita ate 4 pagamentos por operacao, com moedas `USD`, `EUR`, `SRD` e `BRL`.
+- Ao concluir uma operacao pelo formulario rapido, o sistema abre um recibo detalhado com opcao de imprimir, exportar em PDF e compartilhar por WhatsApp.
+- O cadastro de clientes e a conta por cliente dependem da execucao de `sql/schema_clientes_upgrade.sql`.
+- O dashboard acompanha mercado com polling interno, exibindo deltas, percentual, setas, sparkline e feed de noticias para ouro e dolar.
+- Cada lote aberto pode receber configuracao de monitoramento persistida em `gold_inventory_lots.metadata.monitor`.
+- O alerta automatico de venda por WhatsApp so dispara quando `LOT_MONITOR_ENABLED=true` e as tres variaveis `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN` e `TWILIO_WHATSAPP_FROM` estiverem preenchidas.
+- Sem credenciais Twilio, o monitor continua calculando sinais, mas nao envia mensagem outbound.
+
+## Performance web
+
+O painel SaaS agora entrega o CSS e o JavaScript principais como assets estaticos versionados em `app/static/`, com suporte a:
+
+- `GZipMiddleware` para respostas HTML, JSON, CSS e JS acima de 1 KB.
+- `Cache-Control: public, max-age=31536000, immutable` para `/static/*`.
+- `Cache-Control: private, no-store` para HTML autenticado do painel.
+- Versionamento por query string (`/static/arquivo.css?v=...`) com base no `mtime` do arquivo.
+- Páginas sem foco operacional imediato (`perfil`, `clientes`, `extrato`) não montam o rail de mercado nem consultam snapshot externo no SSR.
+- Quando `REDIS_URL` estiver configurada, o app compartilha cache de mercado e agregados críticos de banco entre processos/workers.
+
+### CDN recomendada
+
+Para acelerar a entrega em producao, coloque uma CDN na frente da aplicacao e mantenha as regras abaixo:
+
+- Cachear agressivamente apenas `/static/*`.
+- Nao cachear HTML autenticado de `/saas/*` no edge sem chave por usuario/cookie.
+- Respeitar `Cache-Control` de origem para evitar vazamento de sessao.
+- Habilitar Brotli/GZip na CDN para complementar a compressao de origem.
+
+Exemplos de configuracao:
+
+- Cloudflare: `Cache Everything` somente para `/static/*`, com `Edge TTL` alto.
+- CloudFront: behavior separado para `/static/*` com cache longo e outro behavior para HTML/API sem cache publico.
+
+### Proximas fases sugeridas
+
+- Introduzir Redis para cache de dados compartilhados e fragmentos SSR.
+- Reduzir ainda mais o payload HTML inicial com fragmentacao por pagina e carregamento sob demanda.
+- Converter imagens/ilustracoes futuras para WebP/AVIF com `loading="lazy"`.
+
+Recibos web:
+
+- `GET /saas/recibos/{operation_id}`
+- `GET /saas/recibos/{operation_id}/pdf`
 
 ## Teste rápido de webhook
 

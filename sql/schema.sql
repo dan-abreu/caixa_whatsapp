@@ -41,6 +41,18 @@ CREATE TABLE IF NOT EXISTS usuarios (
     criado_em TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS clientes (
+    id BIGSERIAL PRIMARY KEY,
+    nome VARCHAR(150) NOT NULL,
+    apelido VARCHAR(120),
+    telefone VARCHAR(30),
+    documento VARCHAR(40),
+    observacoes TEXT,
+    ativo BOOLEAN NOT NULL DEFAULT TRUE,
+    criado_em TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    atualizado_em TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS taxas_diarias (
     id BIGSERIAL PRIMARY KEY,
     ativo_id BIGINT NOT NULL REFERENCES ativos(id),
@@ -94,6 +106,7 @@ CREATE TABLE IF NOT EXISTS sessoes_conversa (
 
 CREATE TABLE IF NOT EXISTS gold_transactions (
     id BIGSERIAL PRIMARY KEY,
+    cliente_id BIGINT REFERENCES clientes(id),
     tipo_operacao VARCHAR(20) NOT NULL,
     origem VARCHAR(20) NOT NULL,
     gold_type VARCHAR(20) NOT NULL,
@@ -114,6 +127,19 @@ CREATE TABLE IF NOT EXISTS gold_transactions (
     status VARCHAR(20) NOT NULL DEFAULT 'registrada',
     contexto JSONB NOT NULL DEFAULT '{}'::jsonb,
     criado_em TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS cliente_movimentacoes (
+    id BIGSERIAL PRIMARY KEY,
+    cliente_id BIGINT NOT NULL REFERENCES clientes(id) ON DELETE CASCADE,
+    gold_transaction_id BIGINT REFERENCES gold_transactions(id) ON DELETE SET NULL,
+    moeda VARCHAR(10) NOT NULL,
+    tipo_movimento VARCHAR(40) NOT NULL,
+    valor NUMERIC(20, 8) NOT NULL,
+    descricao TEXT,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    criado_em TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT chk_cliente_mov_moeda CHECK (moeda IN ('XAU', 'USD', 'EUR', 'SRD', 'BRL'))
 );
 
 CREATE TABLE IF NOT EXISTS gold_payments (
@@ -183,6 +209,15 @@ CREATE INDEX IF NOT EXISTS idx_transacoes_data_hora
 CREATE INDEX IF NOT EXISTS idx_usuarios_telefone
     ON usuarios (telefone);
 
+CREATE INDEX IF NOT EXISTS idx_clientes_nome
+    ON clientes (LOWER(nome));
+
+CREATE INDEX IF NOT EXISTS idx_clientes_documento
+    ON clientes (documento);
+
+CREATE INDEX IF NOT EXISTS idx_clientes_telefone
+    ON clientes (telefone);
+
 CREATE INDEX IF NOT EXISTS idx_logs_data_hora
     ON logs (data_hora DESC);
 
@@ -198,8 +233,17 @@ CREATE INDEX IF NOT EXISTS idx_gold_transactions_criado_em
 CREATE INDEX IF NOT EXISTS idx_gold_transactions_operador
     ON gold_transactions (operador_id, criado_em DESC);
 
+CREATE INDEX IF NOT EXISTS idx_gold_transactions_cliente
+    ON gold_transactions (cliente_id, criado_em DESC);
+
 CREATE INDEX IF NOT EXISTS idx_gold_payments_transaction
     ON gold_payments (gold_transaction_id);
+
+CREATE INDEX IF NOT EXISTS idx_cliente_movimentacoes_cliente
+    ON cliente_movimentacoes (cliente_id, criado_em DESC);
+
+CREATE INDEX IF NOT EXISTS idx_cliente_movimentacoes_gold_tx
+    ON cliente_movimentacoes (gold_transaction_id, criado_em DESC);
 
 CREATE INDEX IF NOT EXISTS idx_caixas_moeda
     ON caixas (moeda);
@@ -237,11 +281,35 @@ BEGIN
     IF EXISTS (
         SELECT 1
         FROM information_schema.columns
+        WHERE table_name = 'gold_transactions' AND column_name = 'cliente_id'
+    ) THEN
+        CREATE INDEX IF NOT EXISTS idx_gold_transactions_cliente_runtime
+            ON gold_transactions (cliente_id, criado_em DESC);
+    END IF;
+END$$;
+
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM information_schema.columns
         WHERE table_name = 'gold_transactions' AND column_name = 'source_message_id'
     ) THEN
         CREATE UNIQUE INDEX IF NOT EXISTS uq_gold_transactions_source_message_id
             ON gold_transactions (source_message_id)
             WHERE source_message_id IS NOT NULL;
+    END IF;
+END$$;
+
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM information_schema.tables
+        WHERE table_name = 'gold_transactions'
+    ) THEN
+        ALTER TABLE gold_transactions
+            ADD COLUMN IF NOT EXISTS cliente_id BIGINT REFERENCES clientes(id);
     END IF;
 END$$;
 
