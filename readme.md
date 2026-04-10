@@ -12,7 +12,6 @@ Sistema backend em Python com FastAPI para operar compra e venda de ouro via Wha
 - Extrato por período e relatórios de fechamento/risco.
 - Caixa segregado por moeda/commodity (sem consolidar tudo em USD).
 - Integração com webhook JSON e webhook Twilio.
-- Scripts de setup, execução, simulação e schema.
 
 ## Estrutura atual
 
@@ -20,7 +19,8 @@ Sistema backend em Python com FastAPI para operar compra e venda de ouro via Wha
 caixa_whatsapp/
 |- app/
 |  |- __init__.py
-|  |- ai_intents_lexicon.json
+|  |- ai_lexicon_data/
+|  |  |- *.json
 |  |- ai_service.py
 |  |- database.py
 |  |- main.py
@@ -38,6 +38,8 @@ caixa_whatsapp/
 |  |- stop_background.ps1
 |- sql/
 |  |- schema.sql
+|  |- schema/
+|  |  |- 00_*.sql ... 04_*.sql
 |  |- schema_caixas.sql
 |  |- schema_clientes_upgrade.sql
 |  |- schema_enterprise_upgrade.sql
@@ -129,12 +131,8 @@ Principais opcionais:
 
 Notas de governança do confidence score:
 
-- `AI_CONF_PROFILE` define defaults operacionais para o score (pesos, metas e faixas).
-- `AI_CONF_PROFILE=auto` aplica roteamento por maturidade historica:
-  - seed (`< 30` amostras): `aggressive`
-  - learning/stable (`30-299` amostras): `balanced`
-  - advanced (`>= 300` amostras): `conservative`
-- Qualquer variável `AI_CONF_*` individual definida no ambiente sobrescreve o preset ativo.
+- `AI_CONF_PROFILE` define os presets operacionais do score.
+- `AI_CONF_PROFILE=auto` roteia por maturidade historica e qualquer `AI_CONF_*` individual sobrescreve o preset ativo.
 
 ## Banco de dados
 
@@ -142,11 +140,6 @@ Aplicar schema principal:
 
 ```powershell
 .\scripts\apply_schema.ps1
-```
-
-ou via Python:
-
-```powershell
 .\.venv\Scripts\python.exe .\scripts\apply_schema.py
 ```
 
@@ -173,8 +166,6 @@ Para ambientes antigos, se necessário recalcular saldos dos 5 caixas:
 ## Endpoints já implementados
 
 Base local: `http://127.0.0.1:8000`
-
-Saúde e menu:
 
 - `GET /health`
 - `GET /menu`
@@ -244,29 +235,7 @@ O painel SaaS agora entrega o CSS e o JavaScript principais como assets estatico
 - Versionamento por query string (`/static/arquivo.css?v=...`) com base no `mtime` do arquivo.
 - Páginas sem foco operacional imediato (`perfil`, `clientes`, `extrato`) não montam o rail de mercado nem consultam snapshot externo no SSR.
 - Quando `REDIS_URL` estiver configurada, o app compartilha cache de mercado e agregados críticos de banco entre processos/workers.
-
-### CDN recomendada
-
-Para acelerar a entrega em producao, coloque uma CDN na frente da aplicacao e mantenha as regras abaixo:
-
-- Cachear agressivamente apenas `/static/*`.
-- Nao cachear HTML autenticado de `/saas/*` no edge sem chave por usuario/cookie.
-- Respeitar `Cache-Control` de origem para evitar vazamento de sessao.
-- Habilitar Brotli/GZip na CDN para complementar a compressao de origem.
-
-Exemplos de configuracao:
-
-- Cloudflare: `Cache Everything` somente para `/static/*`, com `Edge TTL` alto.
-- CloudFront: behavior separado para `/static/*` com cache longo e outro behavior para HTML/API sem cache publico.
-
-### Proximas fases sugeridas
-
-- Introduzir Redis para cache de dados compartilhados e fragmentos SSR.
-- Reduzir ainda mais o payload HTML inicial com fragmentacao por pagina e carregamento sob demanda.
-- Converter imagens/ilustracoes futuras para WebP/AVIF com `loading="lazy"`.
-
-Recibos web:
-
+- Em produção, use CDN apenas para `/static/*`, respeite `Cache-Control` de origem e não publique cache de HTML autenticado de `/saas/*` no edge.
 - `GET /saas/recibos/{operation_id}`
 - `GET /saas/recibos/{operation_id}/pdf`
 
@@ -316,10 +285,16 @@ Header necessário:
 Existem suites e smoke tests em `tests/`, incluindo:
 
 - `test_comprehensive.py`
-- `test_caixas.py`
+- `test_caixas.py` (suite `unittest` para inicialização e movimentação dos 5 caixas)
 - `test_menu_options.ps1`
 - `smoke_enterprise.ps1`
 - `hundred_test.ps1`
+
+Para rodar a cobertura focada de caixas:
+
+```bash
+.venv\Scripts\python.exe -m unittest tests.test_caixas -q
+```
 
 ## Deploy
 
@@ -329,9 +304,6 @@ Compatível com Railway/Procfile usando:
 uvicorn app.main:app --host 0.0.0.0 --port $PORT
 ```
 
-## Observações finais
-
-- O projeto já está reorganizado e funcional com código principal em `app/`.
 - O README foi recriado para refletir o estado atual real do código e scripts.
 
 This backend processes WhatsApp messages and runs multi-currency cash operations (USD, EUR, SRD, BRL, XAU) using FastAPI + Supabase.

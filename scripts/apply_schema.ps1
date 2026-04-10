@@ -57,7 +57,7 @@ if (-not (Test-Path $SchemaPath)) {
 
 $psql = Get-Command psql -ErrorAction SilentlyContinue
 if (-not $psql) {
-    throw "psql não encontrado no PATH. Instale PostgreSQL client tools ou use o SQL Editor do Supabase com o conteúdo de schema.sql."
+    throw "psql não encontrado no PATH. Instale PostgreSQL client tools ou use .\scripts\apply_schema.py, que monta o bundle a partir de sql\schema\*.sql."
 }
 
 $resolvedDbUrl = Get-DatabaseUrl -ExplicitUrl $DatabaseUrl

@@ -1,0 +1,270 @@
+from types import SimpleNamespace
+from typing import Any, Dict
+
+from app.ai_service import AIServiceError, extract_message_data
+from app.services import clients as clients_service
+from app.services import guided_flow_orchestrator as guided_flow_orchestrator_service
+from app.services import operation_drafts as operation_drafts_service
+from app.services import operation_runtime_bindings as operation_runtime_bindings_service
+from app.services import receipts as receipts_service
+from app.services import reporting as reporting_service
+from app.services import reporting_runtime as reporting_runtime_service
+from app.services import runtime_saas_helpers as runtime_saas_helpers_service
+from app.services import saas_dashboard_page as saas_dashboard_page_service
+from app.services import statements as statements_service
+from app.services import suppliers as suppliers_service
+from app.services import whatsapp_intents as whatsapp_intents_service
+from app.services import whatsapp_runtime as whatsapp_runtime_service
+from app.services import whatsapp_runtime_bindings as whatsapp_runtime_bindings_service
+
+
+def build_app_composition_runtime_helpers(
+    *,
+    ai_extracted_data_cls: type,
+    money: Any,
+    fx_rate: Any,
+    logger: Any,
+    risk_diff_limit_usd: Any,
+    supported_currencies: Any,
+    guided_flow_states: Any,
+    guided_session_idle_limit: int,
+    dashboard_trends_service: Any,
+    runtime_support_helpers: Any,
+    runtime_saas_date_helpers: Any,
+    runtime_saas_form_helpers: Any,
+    runtime_saas_ui_helpers: Any,
+    runtime_saas_payment_helpers: Any,
+    runtime_view_helpers: Any,
+    runtime_http_helpers: Any,
+    runtime_web_helpers: Any,
+    inventory_metric_helpers: Any,
+    market_runtime_helpers: Any,
+    guided_flow_fx_helpers: Any,
+    whatsapp_input_parser_helpers: Any,
+    operation_rule_helpers: Any,
+    support_helpers: Any,
+) -> SimpleNamespace:
+    guided_flow_orchestrator_helpers = None
+    operation_runtime_helpers = None
+
+    def dispatch_process_guided_flow(
+        remetente: str,
+        mensagem: str,
+        db: Any,
+        contexto: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        return guided_flow_orchestrator_helpers.process_guided_flow(remetente, mensagem, db, contexto)
+
+    def dispatch_build_caixa_detail_response(
+        db: Any,
+        currency: str,
+        start_iso: str,
+        end_iso: str,
+        label_periodo: str,
+    ) -> Dict[str, Any]:
+        return operation_runtime_helpers.build_caixa_detail_response(db, currency, start_iso, end_iso, label_periodo)
+
+    whatsapp_runtime_binding_helpers = whatsapp_runtime_bindings_service.build_whatsapp_runtime_binding_helpers(
+        whatsapp_command_helpers=support_helpers.whatsapp_command_helpers,
+        whatsapp_report_helpers=support_helpers.whatsapp_report_helpers,
+        guided_flow_runtime_helpers=support_helpers.guided_flow_runtime_helpers,
+        whatsapp_transaction_helpers=support_helpers.whatsapp_transaction_helpers,
+        whatsapp_webhook_orchestrator_helpers=support_helpers.whatsapp_webhook_orchestrator_helpers,
+        normalize_text=runtime_support_helpers.normalize_text,
+        build_day_range=runtime_saas_date_helpers.build_day_range,
+        build_week_range=runtime_saas_date_helpers.build_week_range,
+        clear_session=support_helpers.whatsapp_session_helpers.clear_session,
+        save_session=support_helpers.whatsapp_session_helpers.save_session,
+        parse_operation_reference=whatsapp_input_parser_helpers.parse_operation_reference,
+        normalize_edit_field=whatsapp_input_parser_helpers.normalize_edit_field,
+        parse_decimal_from_text=runtime_support_helpers.parse_decimal_from_text,
+        money=money,
+        invalidate_operation_related_view_caches=runtime_view_helpers.invalidate_operation_related_view_caches,
+        supported_currencies=supported_currencies,
+        build_gold_caixa_metrics_from_pending_grams=inventory_metric_helpers.build_gold_caixa_metrics_from_pending_grams,
+        build_whatsapp_checklist_menu=support_helpers.whatsapp_session_helpers.build_whatsapp_checklist_menu,
+        navigation_hint=runtime_support_helpers.navigation_hint,
+        build_pair_cambio_prompt=guided_flow_fx_helpers.build_pair_cambio_prompt,
+        build_cambio_prompt=guided_flow_fx_helpers.build_cambio_prompt,
+        should_trigger_multi_agent_review=support_helpers.multi_agent_review_helpers.should_trigger_multi_agent_review,
+        run_automatic_multi_agent_review=support_helpers.multi_agent_review_helpers.run_automatic_multi_agent_review,
+        guided_flow_states=guided_flow_states,
+        should_reset_guided_session_for_message=support_helpers.whatsapp_message_pattern_helpers.should_reset_guided_session_for_message,
+        is_guided_session_stale=support_helpers.whatsapp_session_helpers.is_guided_session_stale,
+        guided_session_idle_minutes=support_helpers.whatsapp_session_helpers.guided_session_idle_minutes,
+        guided_session_idle_limit=guided_session_idle_limit,
+        process_guided_flow=dispatch_process_guided_flow,
+        is_greeting=support_helpers.whatsapp_message_pattern_helpers.is_greeting,
+        needs_name_onboarding=support_helpers.whatsapp_session_helpers.needs_name_onboarding,
+        handle_pre_ai_message=whatsapp_runtime_service.handle_pre_ai_message,
+        resolve_ai_data=whatsapp_runtime_service.resolve_ai_data,
+        extract_message_data=extract_message_data,
+        ai_extracted_data_cls=ai_extracted_data_cls,
+        ai_service_error_cls=AIServiceError,
+        logger=logger,
+        handle_conversation_intent=whatsapp_intents_service.handle_conversation_intent,
+        is_help_menu_request=support_helpers.whatsapp_message_pattern_helpers.is_help_menu_request,
+        handle_report_intent=whatsapp_intents_service.handle_report_intent,
+        extract_caixa_currency=whatsapp_input_parser_helpers.extract_caixa_currency,
+        build_caixa_detail_response=dispatch_build_caixa_detail_response,
+        normalize_ativo_nome=operation_rule_helpers.normalize_ativo_nome,
+        handle_register_operation_intent=whatsapp_intents_service.handle_register_operation_intent,
+        parse_decimal=runtime_support_helpers.parse_decimal,
+        infer_tipo_operacao=operation_rule_helpers.infer_tipo_operacao,
+        get_session=support_helpers.whatsapp_session_helpers.get_session,
+    )
+
+    operation_runtime_helpers = operation_runtime_bindings_service.build_operation_runtime_helpers(
+        whatsapp_caixa_detail_helpers=support_helpers.whatsapp_caixa_detail_helpers,
+        operation_persistence_helpers=support_helpers.operation_persistence_helpers,
+        format_caixa_movement=runtime_support_helpers.format_caixa_movement,
+        money=money,
+        risk_diff_limit_usd=risk_diff_limit_usd,
+        attach_sale_profit_reference=support_helpers.operation_risk_helpers.attach_sale_profit_reference,
+        normalize_gold_type=operation_rule_helpers.normalize_gold_type,
+        invalidate_operation_related_view_caches=runtime_view_helpers.invalidate_operation_related_view_caches,
+        should_trigger_multi_agent_review=support_helpers.multi_agent_review_helpers.should_trigger_multi_agent_review,
+        run_automatic_multi_agent_review=support_helpers.multi_agent_review_helpers.run_automatic_multi_agent_review,
+        save_session=support_helpers.whatsapp_session_helpers.save_session,
+        build_caixa_response=whatsapp_runtime_binding_helpers.build_caixa_response,
+    )
+
+    runtime_saas_helpers = runtime_saas_helpers_service.build_runtime_saas_helpers(
+        statements_service=statements_service,
+        operation_drafts_service=operation_drafts_service,
+        clients_service=clients_service,
+        suppliers_service=suppliers_service,
+        receipts_service=receipts_service,
+        dashboard_trends_service=dashboard_trends_service,
+        normalize_text=runtime_support_helpers.normalize_text,
+        build_recent_fx_map=runtime_saas_form_helpers.build_saas_recent_fx_map,
+        ai_extracted_data_cls=ai_extracted_data_cls,
+        dashboard_default_form_values=runtime_saas_form_helpers.dashboard_default_form_values,
+        infer_tipo_operacao=operation_rule_helpers.infer_tipo_operacao,
+        parse_decimal_from_text=runtime_support_helpers.parse_decimal_from_text,
+        format_decimal_for_form=runtime_saas_form_helpers.format_decimal_for_form,
+        payment_input_to_usd=guided_flow_fx_helpers.payment_input_to_usd,
+        build_cliente_lookup_meta=runtime_saas_ui_helpers.build_cliente_lookup_meta,
+        build_fornecedor_lookup_meta=runtime_saas_ui_helpers.build_fornecedor_lookup_meta,
+        format_caixa_movement=runtime_support_helpers.format_caixa_movement,
+        render_bank_account_section=support_helpers.bank_accounts_ui_helpers.render_bank_account_section,
+        build_day_range=runtime_saas_date_helpers.build_day_range,
+        build_saas_receipt_context_cache_key=runtime_view_helpers.build_saas_receipt_context_cache_key,
+        get_saas_receipt_context_cached=runtime_view_helpers.get_saas_receipt_context_cached,
+        set_saas_receipt_context_cached=runtime_view_helpers.set_saas_receipt_context_cached,
+        build_saas_statement_context_cache_key=runtime_view_helpers.build_saas_statement_context_cache_key,
+        get_saas_statement_context_cached=runtime_view_helpers.get_saas_statement_context_cached,
+        set_saas_statement_context_cached=runtime_view_helpers.set_saas_statement_context_cached,
+        build_extrato_response=lambda *args, **kwargs: whatsapp_runtime_binding_helpers.build_extrato_response(*args, **kwargs),
+        format_datetime_pt_br=runtime_support_helpers.format_datetime_pt_br,
+    )
+
+    saas_dashboard_page_helpers = saas_dashboard_page_service.build_saas_dashboard_page_helpers(
+        normalize_saas_page=runtime_saas_ui_helpers.normalize_saas_page,
+        dashboard_default_form_values=runtime_saas_form_helpers.dashboard_default_form_values,
+        runtime_saas_context_helpers=support_helpers.runtime_saas_context_helpers,
+        build_day_range=runtime_saas_date_helpers.build_day_range,
+        build_week_range=runtime_saas_date_helpers.build_week_range,
+        build_saas_statement_context=runtime_saas_helpers.build_saas_statement_context,
+        build_saas_clients_context=runtime_saas_helpers.build_saas_clients_context,
+        build_saas_suppliers_context=runtime_saas_helpers.build_saas_suppliers_context,
+        collect_open_fechamentos=inventory_metric_helpers.collect_open_fechamentos,
+        build_gold_caixa_metrics_from_pending_grams=inventory_metric_helpers.build_gold_caixa_metrics_from_pending_grams,
+        get_market_snapshot=market_runtime_helpers.get_market_snapshot,
+        build_open_lot_market_context=market_runtime_helpers.build_open_lot_market_context,
+        build_operation_lot_market_context=market_runtime_helpers.build_operation_lot_market_context,
+        build_market_trend_context=market_runtime_helpers.build_market_trend_context,
+        render_recent_operations_rows=runtime_web_helpers.render_recent_operations_rows,
+        build_saas_chat_welcome=runtime_saas_ui_helpers.build_saas_chat_welcome,
+        build_saas_recent_fx_map=runtime_saas_form_helpers.build_saas_recent_fx_map,
+        build_web_payment_rows_html=runtime_saas_payment_helpers.build_web_payment_rows_html,
+        format_caixa_movement=runtime_support_helpers.format_caixa_movement,
+        runtime_saas_document_helpers=support_helpers.runtime_saas_document_helpers,
+        runtime_saas_layout_helpers=support_helpers.runtime_saas_layout_helpers,
+        runtime_saas_page_helpers=support_helpers.runtime_saas_page_helpers,
+        runtime_saas_operation_page_helpers=support_helpers.runtime_saas_operation_page_helpers,
+        build_fechamento_status=inventory_metric_helpers.build_fechamento_status,
+        render_market_panel_html=market_runtime_helpers.render_market_panel_html,
+        get_market_news=market_runtime_helpers.get_market_news,
+        render_market_news_panel_html=runtime_web_helpers.render_market_news_panel_html,
+        build_web_lot_monitor_view_model=runtime_web_helpers.build_web_lot_monitor_view_model,
+        render_lot_monitor_cards=runtime_web_helpers.render_lot_monitor_cards,
+        normalize_text=runtime_support_helpers.normalize_text,
+        render_saas_clients_page=runtime_saas_helpers.render_saas_clients_page,
+        render_saas_suppliers_page=runtime_saas_helpers.render_saas_suppliers_page,
+        render_bank_account_section=support_helpers.bank_accounts_ui_helpers.render_bank_account_section,
+        normalize_gold_type=operation_rule_helpers.normalize_gold_type,
+        json_for_html_script=runtime_http_helpers.json_for_html_script,
+        asset_url=runtime_http_helpers.asset_url,
+    )
+
+    guided_flow_orchestrator_helpers = guided_flow_orchestrator_service.build_guided_flow_orchestrator_helpers(
+        guided_flow_states=guided_flow_states,
+        normalize_text=runtime_support_helpers.normalize_text,
+        clear_session=support_helpers.whatsapp_session_helpers.clear_session,
+        handle_menu_option=whatsapp_runtime_binding_helpers.handle_menu_option,
+        guided_try_back_command=support_helpers.guided_navigation_runtime_helpers.guided_try_back_command,
+        guided_flow_entry_helpers=support_helpers.guided_flow_entry_helpers,
+        guided_flow_setup_helpers=support_helpers.guided_flow_setup_helpers,
+        guided_flow_payment_helpers=support_helpers.guided_flow_payment_helpers,
+        guided_flow_confirmation_helpers=support_helpers.guided_flow_confirmation_helpers,
+        guided_flow_tail_helpers=support_helpers.guided_flow_tail_helpers,
+        save_session=support_helpers.whatsapp_session_helpers.save_session,
+        format_resumo=support_helpers.guided_flow_summary_helpers.format_resumo,
+        guided_prompt_for_state=support_helpers.guided_navigation_runtime_helpers.guided_prompt_for_state,
+        sanitize_nome=support_helpers.whatsapp_message_pattern_helpers.sanitize_nome,
+        navigation_hint=runtime_support_helpers.navigation_hint,
+        money=money,
+        parse_decimal_from_text=runtime_support_helpers.parse_decimal_from_text,
+        parse_origem_choice=whatsapp_input_parser_helpers.parse_origem_choice,
+        parse_single_currency_choice=whatsapp_input_parser_helpers.parse_single_currency_choice,
+        extract_moedas=whatsapp_input_parser_helpers.extract_moedas,
+        normalize_cambio_para_usd=guided_flow_fx_helpers.normalize_cambio_para_usd,
+        build_pair_cambio_prompt=guided_flow_fx_helpers.build_pair_cambio_prompt,
+        supported_currencies=supported_currencies,
+        try_set_total_usd_from_base_rate=guided_flow_fx_helpers.try_set_total_usd_from_base_rate,
+        pair_rate_to_payment_per_usd=guided_flow_fx_helpers.pair_rate_to_payment_per_usd,
+        moeda_strength=guided_flow_fx_helpers.moeda_strength,
+        fx_rate=fx_rate,
+        advance_after_payment_exchange=whatsapp_runtime_binding_helpers.advance_after_payment_exchange,
+        build_cambio_prompt=guided_flow_fx_helpers.build_cambio_prompt,
+        parse_fechamento_tipo_choice=whatsapp_input_parser_helpers.parse_fechamento_tipo_choice,
+        parse_forma_pagamento_choice=whatsapp_input_parser_helpers.parse_forma_pagamento_choice,
+        attach_sale_profit_reference=support_helpers.operation_risk_helpers.attach_sale_profit_reference,
+        extract_confirmacao=whatsapp_input_parser_helpers.extract_confirmacao,
+        project_caixa_balances=support_helpers.operation_risk_helpers.project_caixa_balances,
+        find_negative_caixa_balances=support_helpers.operation_risk_helpers.find_negative_caixa_balances,
+        format_negative_caixa_lines=support_helpers.operation_risk_helpers.format_negative_caixa_lines,
+        persist_gold_operation_from_context=operation_runtime_helpers.persist_gold_operation_from_context,
+        extract_caixa_currency=whatsapp_input_parser_helpers.extract_caixa_currency,
+        build_day_range=runtime_saas_date_helpers.build_day_range,
+        build_week_range=runtime_saas_date_helpers.build_week_range,
+        build_caixa_detail_response=operation_runtime_helpers.build_caixa_detail_response,
+        build_extrato_response=whatsapp_runtime_binding_helpers.build_extrato_response,
+        parse_date_user_input=runtime_saas_date_helpers.parse_date_user_input,
+        finish_transacao_simples=whatsapp_runtime_binding_helpers.finish_transacao_simples,
+    )
+
+    reporting_runtime_helpers = reporting_runtime_service.build_reporting_runtime_helpers(
+        reporting_service=reporting_service,
+        get_cached_payload=runtime_view_helpers.get_inventory_status_report_cached,
+        set_cached_payload=runtime_view_helpers.set_inventory_status_report_cached,
+        get_market_snapshot=market_runtime_helpers.get_market_snapshot,
+        build_open_lot_market_context=market_runtime_helpers.build_open_lot_market_context,
+        compute_inventory_metrics=inventory_metric_helpers.compute_inventory_metrics,
+        build_fifo_inventory_lots=inventory_metric_helpers.build_fifo_inventory_lots,
+        build_day_range=runtime_saas_date_helpers.build_day_range,
+        build_cache_key=runtime_view_helpers.build_admin_dashboard_cache_key,
+        get_cached_html=runtime_view_helpers.get_admin_dashboard_cached,
+        set_cached_html=runtime_view_helpers.set_admin_dashboard_cached,
+        format_caixa_movement=runtime_support_helpers.format_caixa_movement,
+    )
+
+    return SimpleNamespace(
+        whatsapp_runtime_binding_helpers=whatsapp_runtime_binding_helpers,
+        operation_runtime_helpers=operation_runtime_helpers,
+        runtime_saas_helpers=runtime_saas_helpers,
+        saas_dashboard_page_helpers=saas_dashboard_page_helpers,
+        guided_flow_orchestrator_helpers=guided_flow_orchestrator_helpers,
+        reporting_runtime_helpers=reporting_runtime_helpers,
+    )

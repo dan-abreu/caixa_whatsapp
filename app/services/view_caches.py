@@ -2,6 +2,16 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, Optional, cast
 
 
+def _invalidate_cache_entries(*, cache_store: Dict[str, Dict[str, Any]], cache_key_prefix: Optional[str] = None) -> None:
+    if not cache_key_prefix:
+        cache_store.clear()
+        return
+
+    prefix = f"{cache_key_prefix}:"
+    for cache_key in [key for key in list(cache_store.keys()) if str(key).startswith(prefix)]:
+        cache_store.pop(cache_key, None)
+
+
 def _build_saas_statement_context_cache_key(cache_key_prefix: str, start_iso: str, end_iso: str) -> str:
     return f"{cache_key_prefix}:{start_iso}:{end_iso}"
 
@@ -43,8 +53,12 @@ def _set_saas_statement_context_cached(
     return context
 
 
-def _invalidate_statement_context_cache(*, cache_store: Dict[str, Dict[str, Any]]) -> None:
-    cache_store.clear()
+def _invalidate_statement_context_cache(
+    *,
+    cache_store: Dict[str, Dict[str, Any]],
+    cache_key_prefix: Optional[str] = None,
+) -> None:
+    _invalidate_cache_entries(cache_store=cache_store, cache_key_prefix=cache_key_prefix)
 
 
 def _get_saas_recent_fx_cached(*, cache_store: Dict[str, Any], ttl_seconds: int) -> Optional[Dict[str, str]]:
@@ -115,8 +129,12 @@ def _set_saas_receipt_context_cached(
     return context
 
 
-def _invalidate_receipt_context_cache(*, cache_store: Dict[str, Dict[str, Any]]) -> None:
-    cache_store.clear()
+def _invalidate_receipt_context_cache(
+    *,
+    cache_store: Dict[str, Dict[str, Any]],
+    cache_key_prefix: Optional[str] = None,
+) -> None:
+    _invalidate_cache_entries(cache_store=cache_store, cache_key_prefix=cache_key_prefix)
 
 
 def _build_saas_lot_monitor_snapshot_cache_key(
@@ -166,8 +184,12 @@ def _set_saas_lot_monitor_snapshot_cached(
     return payload
 
 
-def _invalidate_lot_monitor_snapshot_cache(*, cache_store: Dict[str, Dict[str, Any]]) -> None:
-    cache_store.clear()
+def _invalidate_lot_monitor_snapshot_cache(
+    *,
+    cache_store: Dict[str, Dict[str, Any]],
+    cache_key_prefix: Optional[str] = None,
+) -> None:
+    _invalidate_cache_entries(cache_store=cache_store, cache_key_prefix=cache_key_prefix)
 
 
 def _build_admin_dashboard_cache_key(cache_key_prefix: str, day_label: str) -> str:
@@ -227,7 +249,12 @@ def _set_admin_dashboard_cached(
     return html
 
 
-def _invalidate_reporting_cache(*, inventory_status_cache: Dict[str, Any], admin_dashboard_cache: Dict[str, Dict[str, Any]]) -> None:
+def _invalidate_reporting_cache(
+    *,
+    inventory_status_cache: Dict[str, Any],
+    admin_dashboard_cache: Dict[str, Dict[str, Any]],
+    admin_dashboard_cache_key_prefix: Optional[str] = None,
+) -> None:
     inventory_status_cache["expires_at"] = None
     inventory_status_cache["data"] = None
-    admin_dashboard_cache.clear()
+    _invalidate_cache_entries(cache_store=admin_dashboard_cache, cache_key_prefix=admin_dashboard_cache_key_prefix)

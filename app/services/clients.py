@@ -12,10 +12,12 @@ def _build_saas_clients_context(
 ) -> Dict[str, Any]:
     clients = db.list_clientes_with_balances(search=search_term, limit=40)
     selected_account = db.get_cliente_account_snapshot(selected_client_id) if selected_client_id else None
+    selected_bank_accounts = db.list_cliente_bank_accounts(selected_client_id) if selected_client_id else []
     return {
         "search_term": str(search_term or "").strip(),
         "clients": clients,
         "selected_account": selected_account,
+        "selected_bank_accounts": selected_bank_accounts,
     }
 
 
@@ -25,6 +27,7 @@ def _render_saas_clients_page(
     *,
     build_cliente_lookup_meta: Callable[[Dict[str, Any]], str],
     format_caixa_movement: Callable[[str, Decimal], str],
+    render_bank_account_section: Callable[..., str],
 ) -> str:
     selected_account = cast(Optional[Dict[str, Any]], clients_context.get("selected_account"))
     selected_cliente = cast(Optional[Dict[str, Any]], (selected_account or {}).get("cliente"))
@@ -54,6 +57,16 @@ def _render_saas_clients_page(
             f"<tr><td>GT-{escape(str(item.get('id') or '-'))}</td><td>{escape(str(item.get('tipo_operacao') or '-').upper())}</td><td>{escape(str(item.get('peso') or '0'))} g</td><td>{escape(str(item.get('fechamento_gramas') or '0'))} g</td></tr>"
             for item in recent_transactions[:10]
         ) or "<tr><td colspan='4'>Sem operacoes vinculadas.</td></tr>"
+        bank_accounts_html = render_bank_account_section(
+            title="Contas Bancarias do Cliente",
+            hint="Salve varias contas por moeda. Isso deixa o operador apenas selecionando as contas certas quando o pagamento vier por transferencia.",
+            action=f"/saas/clientes/{int(selected_cliente.get('id') or 0)}/bank-accounts",
+            page="clients",
+            accounts=cast(List[Dict[str, Any]], clients_context.get("selected_bank_accounts") or []),
+            empty_message="Nenhuma conta bancaria salva para este cliente.",
+            submit_label="Salvar conta do cliente",
+            allow_management=True,
+        )
         selected_summary_html = f"""
         <div class='stack'>
             <section class='panel section'>
@@ -80,6 +93,7 @@ def _render_saas_clients_page(
                     <tbody>{transaction_rows}</tbody>
                 </table>
             </section>
+            {bank_accounts_html}
         </div>
         """
 
